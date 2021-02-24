@@ -6,4 +6,3 @@ edition = "2018"
 license = "GPL-3.0-or-later"
 
 [dependencies]
-indexmap = "1.6.1"

@@ -1,13 +1,15 @@
-use indexmap::set::IndexSet;
-use std::{collections::VecDeque, hash::Hash};
+use std::{
+    collections::{HashSet, VecDeque},
+    hash::Hash,
+};
 
 pub trait SearchState: Sized {
-    fn get_transitions(&self) -> IndexSet<Self>;
+    fn get_transitions(&self) -> HashSet<Self>;
 }
 
 pub struct BreathFirstTester<S> {
     to_search: VecDeque<S>,
-    already_searched: IndexSet<S>,
+    already_searched: HashSet<S>,
     invariants: Vec<fn(&S) -> bool>,
     end_condition: fn(&S) -> bool,
 }
@@ -25,7 +27,7 @@ impl<S> BreathFirstTester<S> {
         to_search.push_back(start);
         BreathFirstTester {
             to_search,
-            already_searched: IndexSet::new(),
+            already_searched: HashSet::new(),
             invariants,
             end_condition,
         }
@@ -47,7 +49,7 @@ impl<S> BreathFirstTester<S> {
             }
 
             // Add all of the states after each transition to the search list if they are not already known.
-            for next_state in state.get_transitions().drain(..) {
+            for next_state in state.get_transitions() {
                 if !self.to_search.contains(&next_state)
                     && !self.already_searched.contains(&next_state)
                     && next_state != state
@@ -73,8 +75,8 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(&self) -> IndexSet<Self> {
-                IndexSet::new()
+            fn get_transitions(&self) -> HashSet<Self> {
+                HashSet::new()
             }
         }
 
@@ -89,8 +91,8 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(&self) -> IndexSet<Self> {
-                IndexSet::new()
+            fn get_transitions(&self) -> HashSet<Self> {
+                HashSet::new()
             }
         }
 
@@ -105,8 +107,8 @@ mod tests {
         struct State(usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> IndexSet<Self> {
-                let mut out = IndexSet::new();
+            fn get_transitions(&self) -> HashSet<Self> {
+                let mut out = HashSet::new();
                 out.insert(State(self.0 + 1));
                 out
             }
@@ -123,8 +125,8 @@ mod tests {
         struct State(usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> IndexSet<Self> {
-                let mut out = IndexSet::new();
+            fn get_transitions(&self) -> HashSet<Self> {
+                let mut out = HashSet::new();
                 out.insert(State(self.0 + 1));
                 out
             }
@@ -141,8 +143,8 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> IndexSet<Self> {
-                let mut out = IndexSet::new();
+            fn get_transitions(&self) -> HashSet<Self> {
+                let mut out = HashSet::new();
                 out.insert(State(self.0 + 1, self.1));
                 out.insert(State(self.0, self.1 + 1));
                 out
@@ -160,8 +162,8 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> IndexSet<Self> {
-                let mut out = IndexSet::new();
+            fn get_transitions(&self) -> HashSet<Self> {
+                let mut out = HashSet::new();
                 out.insert(State(self.0 + 1, self.1));
                 out.insert(State(self.0, self.1 + 1));
                 out
@@ -173,5 +175,21 @@ mod tests {
         });
 
         assert_eq!(Err(State(10, 5)), tester.search());
+    }
+
+    #[test]
+    fn multiple_invariants() {
+        #[derive(Hash, Eq, PartialEq, Debug)]
+        struct State();
+
+        impl SearchState for State {
+            fn get_transitions(&self) -> HashSet<Self> {
+                HashSet::new()
+            }
+        }
+
+        let mut tester = BreathFirstTester::new(State(), vec![|_s| true, |_s| false], |_s| false);
+
+        assert_eq!(Err(State()), tester.search());
     }
 }
