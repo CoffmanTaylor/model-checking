@@ -10,6 +10,7 @@ pub trait SearchState: Sized {
 pub struct SearchConfig<'a, S> {
     start_states: VecDeque<S>,
     invariants: Vec<(fn(&S) -> bool, &'a str)>,
+    prune_conditions: Vec<fn(&S) -> bool>,
 }
 
 impl<'a, S> SearchConfig<'a, S> {
@@ -22,6 +23,7 @@ impl<'a, S> SearchConfig<'a, S> {
         SearchConfig {
             start_states,
             invariants: Vec::new(),
+            prune_conditions: Vec::new(),
         }
     }
 
@@ -35,6 +37,11 @@ impl<'a, S> SearchConfig<'a, S> {
         I: IntoIterator<Item = (fn(&S) -> bool, &'a str)>,
     {
         self.invariants.extend(invs);
+        self
+    }
+
+    pub fn add_prune_condition(mut self, prune_condition: fn(&S) -> bool) -> Self {
+        self.prune_conditions.push(prune_condition);
         self
     }
 
@@ -56,6 +63,11 @@ impl<'a, S> SearchConfig<'a, S> {
             // Check the end condition.
             if end_condition(&state) {
                 return Ok(state);
+            }
+
+            // Check if the state should be pruned
+            if self.prune_conditions.iter().any(|f| f(&state)) {
+                continue;
             }
 
             // Add all of the states after each transition to the search list if they are not already known.
@@ -201,5 +213,26 @@ mod tests {
             .add_invariant("test 2", |_| false);
 
         assert_eq!(Err((State(), "test 2")), tester.search_bfs(|_| false));
+    }
+
+    #[test]
+    fn pruning() {
+        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
+        struct State(usize, usize);
+
+        impl SearchState for State {
+            fn get_transitions(&self) -> HashSet<Self> {
+                let mut out = HashSet::new();
+                out.insert(State(self.0 + 1, self.1));
+                out.insert(State(self.0, self.1 + 1));
+                out
+            }
+        }
+
+        let tester = SearchConfig::new(State(0, 0))
+            .add_invariant("test", |s| s.1 != 4)
+            .add_prune_condition(|s| s.1 >= 3);
+
+        assert_eq!(Ok(State(10, 0)), tester.search_bfs(|s| s == &State(10, 0)));
     }
 }
