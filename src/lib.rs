@@ -1,16 +1,18 @@
 use std::{
     collections::{HashSet, VecDeque},
     hash::Hash,
+    rc::Rc,
 };
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
 /// of the System. `get_transitions` must be deterministic and idempotent. It is a logical error if
 /// two equal `SearchState`s return different results from `get_transitions`.
-pub trait SearchState: Sized {
-    fn get_transitions(&self) -> HashSet<Self>;
+pub trait SearchState {
+    fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = Self>>;
 }
 
 /// Defines the System that you want to search. The System contains at least one start state.
+#[derive(Clone)]
 pub struct SearchConfig<'a, S> {
     start_states: VecDeque<S>,
     invariants: Vec<(fn(&S) -> bool, &'a str)>,
@@ -19,10 +21,7 @@ pub struct SearchConfig<'a, S> {
 
 impl<'a, S> SearchConfig<'a, S> {
     /// Constructs a new `SearchConfig` using the provided state as the only start state.
-    pub fn new(start_state: S) -> SearchConfig<'a, S>
-    where
-        S: Eq + Hash,
-    {
+    pub fn new(start_state: S) -> SearchConfig<'a, S> {
         let mut start_states = VecDeque::new();
         start_states.push_back(start_state);
         SearchConfig {
@@ -66,38 +65,45 @@ impl<'a, S> SearchConfig<'a, S> {
     where
         S: Eq + Hash + SearchState + Clone,
     {
-        let mut to_search = self.start_states.clone();
+        let mut to_search: VecDeque<(usize, Box<dyn Iterator<Item = S>>)> = VecDeque::new();
+        to_search.push_back((0, Box::new(self.start_states.iter().cloned())));
+
         let mut already_searched = HashSet::new();
+        let mut count: usize = 0;
 
-        while let Some(state) = to_search.pop_front() {
-            // Check the invariants.
-            for (inv, name) in self.invariants.iter() {
-                if !inv(&state) {
-                    return Err((state, name));
+        while let Some(mut states) = to_search.pop_front() {
+            while let Some(state) = states.1.next() {
+                if already_searched.contains(&state) {
+                    continue;
                 }
-            }
 
-            // Check the end condition.
-            if end_condition(&state) {
-                return Ok(state);
-            }
-
-            // Check if the state should be pruned
-            if self.prune_conditions.iter().any(|f| f(&state)) {
-                continue;
-            }
-
-            // Add all of the states after each transition to the search list if they are not already known.
-            for next_state in state.get_transitions() {
-                if !to_search.contains(&next_state)
-                    && !already_searched.contains(&next_state)
-                    && next_state != state
-                {
-                    to_search.push_back(next_state);
+                count += 1;
+                if count.is_power_of_two() {
+                    println!("Searched {} states, At depth: {}", count, states.0);
                 }
-            }
 
-            already_searched.insert(state);
+                // Check the invariants.
+                for (inv, name) in self.invariants.iter() {
+                    if !inv(&state) {
+                        return Err((state, name));
+                    }
+                }
+
+                // Check the end condition.
+                if end_condition(&state) {
+                    return Ok(state);
+                }
+
+                // Check if the state should be pruned
+                if self.prune_conditions.iter().any(|f| f(&state)) {
+                    continue;
+                }
+
+                let state_rc = Rc::new(state);
+                already_searched.insert(Rc::clone(&state_rc));
+
+                to_search.push_back((states.0 + 1, Rc::clone(&state_rc).get_transitions()));
+            }
         }
 
         unimplemented!("Exhaustive searches are not implemented yet.")
@@ -107,6 +113,7 @@ impl<'a, S> SearchConfig<'a, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter;
 
     #[test]
     fn first_state_breaks() {
@@ -114,8 +121,8 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                HashSet::new()
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(iter::empty())
             }
         }
 
@@ -130,8 +137,8 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                HashSet::new()
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(iter::empty())
             }
         }
 
@@ -146,10 +153,8 @@ mod tests {
         struct State(usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                let mut out = HashSet::new();
-                out.insert(State(self.0 + 1));
-                out
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(iter::once(State(self.0 + 1)))
             }
         }
 
@@ -164,10 +169,8 @@ mod tests {
         struct State(usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                let mut out = HashSet::new();
-                out.insert(State(self.0 + 1));
-                out
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(iter::once(State(self.0 + 1)))
             }
         }
 
@@ -182,11 +185,11 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                let mut out = HashSet::new();
-                out.insert(State(self.0 + 1, self.1));
-                out.insert(State(self.0, self.1 + 1));
-                out
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(
+                    iter::once(State(self.0 + 1, self.1))
+                        .chain(iter::once(State(self.0, self.1 + 1))),
+                )
             }
         }
 
@@ -201,11 +204,11 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                let mut out = HashSet::new();
-                out.insert(State(self.0 + 1, self.1));
-                out.insert(State(self.0, self.1 + 1));
-                out
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(
+                    iter::once(State(self.0 + 1, self.1))
+                        .chain(iter::once(State(self.0, self.1 + 1))),
+                )
             }
         }
 
@@ -220,8 +223,8 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                HashSet::new()
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(iter::empty())
             }
         }
 
@@ -238,11 +241,11 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(&self) -> HashSet<Self> {
-                let mut out = HashSet::new();
-                out.insert(State(self.0 + 1, self.1));
-                out.insert(State(self.0, self.1 + 1));
-                out
+            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(
+                    iter::once(State(self.0 + 1, self.1))
+                        .chain(iter::once(State(self.0, self.1 + 1))),
+                )
             }
         }
 
