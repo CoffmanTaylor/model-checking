@@ -1,15 +1,28 @@
 use std::{
     collections::{HashSet, VecDeque},
     hash::Hash,
-    rc::Rc,
+    sync::Arc,
 };
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
 /// of the System. `get_transitions` must be deterministic and idempotent. It is a logical error if
 /// two equal `SearchState`s return different results from `get_transitions`.
 pub trait SearchState {
-    fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = Self>>;
+    fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = Self>>;
 }
+
+/// The results of preforming a search on a system.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SearchResults<'a, State> {
+    /// The contained State matches the end condition and is reachable from one of the starting states.
+    Found(State),
+    /// The contained State broke the named invariant.
+    BrokenInvariant(State, &'a str),
+    /// All reachable States, without going past max depth, do not match the end condition.
+    SpaceExhausted,
+}
+
+use SearchResults::{BrokenInvariant, Found, SpaceExhausted};
 
 /// Defines the System that you want to search. The System contains at least one start state.
 #[derive(Clone)]
@@ -17,6 +30,7 @@ pub struct SearchConfig<'a, S> {
     start_states: VecDeque<S>,
     invariants: Vec<(fn(&S) -> bool, &'a str)>,
     prune_conditions: Vec<fn(&S) -> bool>,
+    max_depth: Option<usize>,
 }
 
 impl<'a, S> SearchConfig<'a, S> {
@@ -28,6 +42,7 @@ impl<'a, S> SearchConfig<'a, S> {
             start_states,
             invariants: Vec::new(),
             prune_conditions: Vec::new(),
+            max_depth: None,
         }
     }
 
@@ -57,11 +72,21 @@ impl<'a, S> SearchConfig<'a, S> {
         self
     }
 
+    /// Sets the maximum depth any search will go. If the end condition cannot be found within
+    /// the states reachable inside the maximum depth, a `SearchResult::SpaceExhausted` will be
+    /// returned.
+    ///
+    /// Default to no maximum depth.
+    pub fn set_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = Some(max_depth);
+        self
+    }
+
     /// Preforms a Breath First Search on the System looking for the a state that matches the given
-    /// end condition. If a matching state is found, it is returned in `Ok(State)`. If any of the
+    /// end condition. If a matching state is found, it is returned in `Found(State)`. If any of the
     /// System's invariants are violated, then the state that failed and the name of the invariant
-    /// are returned as `Err((State, name))`.
-    pub fn search_bfs(&self, end_condition: fn(&S) -> bool) -> Result<S, (S, &'a str)>
+    /// are returned as `BrokenInvariant(State, name)`.
+    pub fn search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<'a, S>
     where
         S: Eq + Hash + SearchState + Clone,
     {
@@ -85,13 +110,13 @@ impl<'a, S> SearchConfig<'a, S> {
                 // Check the invariants.
                 for (inv, name) in self.invariants.iter() {
                     if !inv(&state) {
-                        return Err((state, name));
+                        return BrokenInvariant(state, name);
                     }
                 }
 
                 // Check the end condition.
                 if end_condition(&state) {
-                    return Ok(state);
+                    return Found(state);
                 }
 
                 // Check if the state should be pruned
@@ -99,14 +124,21 @@ impl<'a, S> SearchConfig<'a, S> {
                     continue;
                 }
 
-                let state_rc = Rc::new(state);
-                already_searched.insert(Rc::clone(&state_rc));
+                // Add this state to the set of searched states.
+                let state_rc = Arc::new(state);
+                already_searched.insert(Arc::clone(&state_rc));
 
-                to_search.push_back((states.0 + 1, Rc::clone(&state_rc).get_transitions()));
+                // Check if we are at the maximin depth.
+                if self.max_depth == Some(states.0) {
+                    continue;
+                }
+
+                // Add the possible transitions to the search queue.
+                to_search.push_back((states.0 + 1, Arc::clone(&state_rc).get_transitions()));
             }
         }
 
-        unimplemented!("Exhaustive searches are not implemented yet.")
+        SpaceExhausted
     }
 }
 
@@ -121,14 +153,17 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(iter::empty())
             }
         }
 
         let tester = SearchConfig::new(State()).add_invariant("test", |_| false);
 
-        assert_eq!(Err((State(), "test")), tester.search_bfs(|_| false));
+        assert_eq!(
+            BrokenInvariant(State(), "test"),
+            tester.search_bfs(|_| false)
+        );
     }
 
     #[test]
@@ -137,14 +172,14 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(iter::empty())
             }
         }
 
         let tester = SearchConfig::new(State());
 
-        assert_eq!(Ok(State()), tester.search_bfs(|_| true));
+        assert_eq!(Found(State()), tester.search_bfs(|_| true));
     }
 
     #[test]
@@ -153,14 +188,14 @@ mod tests {
         struct State(usize);
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(iter::once(State(self.0 + 1)))
             }
         }
 
         let tester = SearchConfig::new(State(0));
 
-        assert_eq!(Ok(State(10)), tester.search_bfs(|s| s == &State(10)));
+        assert_eq!(Found(State(10)), tester.search_bfs(|s| s == &State(10)));
     }
 
     #[test]
@@ -169,14 +204,17 @@ mod tests {
         struct State(usize);
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(iter::once(State(self.0 + 1)))
             }
         }
 
         let tester = SearchConfig::new(State(0)).add_invariant("test", |s| s.0 != 10);
 
-        assert_eq!(Err((State(10), "test")), tester.search_bfs(|_| false));
+        assert_eq!(
+            BrokenInvariant(State(10), "test"),
+            tester.search_bfs(|_| false)
+        );
     }
 
     #[test]
@@ -185,7 +223,7 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(
                     iter::once(State(self.0 + 1, self.1))
                         .chain(iter::once(State(self.0, self.1 + 1))),
@@ -195,7 +233,10 @@ mod tests {
 
         let tester = SearchConfig::new(State(0, 0));
 
-        assert_eq!(Ok(State(10, 5)), tester.search_bfs(|s| s == &State(10, 5)));
+        assert_eq!(
+            Found(State(10, 5)),
+            tester.search_bfs(|s| s == &State(10, 5))
+        );
     }
 
     #[test]
@@ -204,7 +245,7 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(
                     iter::once(State(self.0 + 1, self.1))
                         .chain(iter::once(State(self.0, self.1 + 1))),
@@ -214,7 +255,10 @@ mod tests {
 
         let tester = SearchConfig::new(State(0, 0)).add_invariant("test", |s| s != &State(10, 5));
 
-        assert_eq!(Err((State(10, 5), "test")), tester.search_bfs(|_| false));
+        assert_eq!(
+            BrokenInvariant(State(10, 5), "test"),
+            tester.search_bfs(|_| false)
+        );
     }
 
     #[test]
@@ -223,7 +267,7 @@ mod tests {
         struct State();
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(iter::empty())
             }
         }
@@ -232,7 +276,10 @@ mod tests {
             .add_invariant("test 1", |_| true)
             .add_invariant("test 2", |_| false);
 
-        assert_eq!(Err((State(), "test 2")), tester.search_bfs(|_| false));
+        assert_eq!(
+            BrokenInvariant(State(), "test 2"),
+            tester.search_bfs(|_| false)
+        );
     }
 
     #[test]
@@ -241,7 +288,7 @@ mod tests {
         struct State(usize, usize);
 
         impl SearchState for State {
-            fn get_transitions(self: Rc<Self>) -> Box<dyn Iterator<Item = State>> {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 Box::new(
                     iter::once(State(self.0 + 1, self.1))
                         .chain(iter::once(State(self.0, self.1 + 1))),
@@ -253,6 +300,61 @@ mod tests {
             .add_invariant("test", |s| s.1 != 4)
             .add_prune_condition(|s| s.1 >= 3);
 
-        assert_eq!(Ok(State(10, 0)), tester.search_bfs(|s| s == &State(10, 0)));
+        assert_eq!(
+            Found(State(10, 0)),
+            tester.search_bfs(|s| s == &State(10, 0))
+        );
+    }
+
+    #[test]
+    fn bounded_space() {
+        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
+        struct State(usize);
+
+        impl SearchState for State {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
+                if self.0 < 10 {
+                    Box::new(iter::once(State(self.0 + 1)))
+                } else {
+                    Box::new(iter::empty())
+                }
+            }
+        }
+
+        let tester = SearchConfig::new(State(0));
+
+        assert_eq!(SpaceExhausted, tester.search_bfs(|s| s.0 > 20));
+    }
+
+    #[test]
+    fn max_depth_exhausted() {
+        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
+        struct State(usize);
+
+        impl SearchState for State {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(iter::once(State(self.0 + 1)))
+            }
+        }
+
+        let tester = SearchConfig::new(State(0)).set_max_depth(10);
+
+        assert_eq!(SpaceExhausted, tester.search_bfs(|_| false));
+    }
+
+    #[test]
+    fn max_depth_found() {
+        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
+        struct State(usize);
+
+        impl SearchState for State {
+            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
+                Box::new(iter::once(State(self.0 + 1)))
+            }
+        }
+
+        let tester = SearchConfig::new(State(0)).set_max_depth(10);
+
+        assert_eq!(Found(State(10)), tester.search_bfs(|s| s == &State(10)));
     }
 }
