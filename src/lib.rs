@@ -2,13 +2,15 @@ use std::{
     collections::{HashSet, VecDeque},
     hash::Hash,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
 /// of the System. `get_transitions` must be deterministic and idempotent. It is a logical error if
 /// two equal `SearchState`s return different results from `get_transitions`.
 pub trait SearchState {
-    fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = Self>>;
+    type Iter: Iterator<Item = Self>;
+    fn get_transitions(self: Arc<Self>) -> Self::Iter;
 }
 
 /// The results of preforming a search on a system.
@@ -20,29 +22,36 @@ pub enum SearchResults<'a, State> {
     BrokenInvariant(State, &'a str),
     /// All reachable States, without going past max depth, do not match the end condition.
     SpaceExhausted,
+    /// The number of states searched exceeds the maximum provided.
+    SearchedOverMax,
+    TimedOut,
 }
 
-use SearchResults::{BrokenInvariant, Found, SpaceExhausted};
+use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, TimedOut};
 
 /// Defines the System that you want to search. The System contains at least one start state.
 #[derive(Clone)]
 pub struct SearchConfig<'a, S> {
-    start_states: VecDeque<S>,
+    start_states: VecDeque<Arc<S>>,
     invariants: Vec<(fn(&S) -> bool, &'a str)>,
     prune_conditions: Vec<fn(&S) -> bool>,
     max_depth: Option<usize>,
+    max_states: Option<usize>,
+    max_time: Option<Duration>,
 }
 
 impl<'a, S> SearchConfig<'a, S> {
     /// Constructs a new `SearchConfig` using the provided state as the only start state.
     pub fn new(start_state: S) -> SearchConfig<'a, S> {
         let mut start_states = VecDeque::new();
-        start_states.push_back(start_state);
+        start_states.push_back(Arc::new(start_state));
         SearchConfig {
             start_states,
             invariants: Vec::new(),
             prune_conditions: Vec::new(),
             max_depth: None,
+            max_states: None,
+            max_time: None,
         }
     }
 
@@ -82,19 +91,41 @@ impl<'a, S> SearchConfig<'a, S> {
         self
     }
 
+    pub fn set_max_number_of_states(mut self, max_states: usize) -> Self {
+        self.max_states = Some(max_states);
+        self
+    }
+
+    pub fn set_timeout(mut self, timeout: Duration) -> Self {
+        self.max_time = Some(timeout);
+        self
+    }
+
     /// Preforms a Breath First Search on the System looking for the a state that matches the given
     /// end condition. If a matching state is found, it is returned in `Found(State)`. If any of the
     /// System's invariants are violated, then the state that failed and the name of the invariant
     /// are returned as `BrokenInvariant(State, name)`.
+    ///
+    /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
+    /// brake invariants.
     pub fn search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<'a, S>
     where
         S: Eq + Hash + SearchState + Clone,
     {
-        let mut to_search: VecDeque<(usize, Box<dyn Iterator<Item = S>>)> = VecDeque::new();
-        to_search.push_back((0, Box::new(self.start_states.iter().cloned())));
+        let mut to_search = VecDeque::new();
+        to_search.extend(
+            self.start_states
+                .iter()
+                .map(|s| (0, Arc::clone(s).get_transitions())),
+        );
 
         let mut already_searched = HashSet::new();
         let mut count: usize = 0;
+
+        let start_time = Instant::now();
+        let mut last_print = start_time.clone();
+
+        println!("Starting search...");
 
         while let Some(mut states) = to_search.pop_front() {
             while let Some(state) = states.1.next() {
@@ -103,8 +134,18 @@ impl<'a, S> SearchConfig<'a, S> {
                 }
 
                 count += 1;
-                if count.is_power_of_two() {
-                    println!("Searched {} states, At depth: {}", count, states.0);
+                if last_print.elapsed() > Duration::from_secs(5) {
+                    last_print = Instant::now();
+                    println!("Searched {} states, Current depth: {}", count, states.0);
+                }
+                if self.max_states.is_some() && Some(count) > self.max_states {
+                    return SearchedOverMax;
+                }
+
+                if let Some(timeout) = self.max_time {
+                    if start_time.elapsed() > timeout {
+                        return TimedOut;
+                    }
                 }
 
                 // Check the invariants.
@@ -147,69 +188,50 @@ mod tests {
     use super::*;
     use std::iter;
 
-    #[test]
-    fn first_state_breaks() {
+    mod chain {
+        use super::*;
+
         #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State();
+        pub struct State(pub usize);
 
         impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(iter::empty())
+            type Iter = iter::Once<State>;
+            fn get_transitions(self: Arc<Self>) -> Self::Iter {
+                iter::once(State(self.0 + 1))
             }
         }
-
-        let tester = SearchConfig::new(State()).add_invariant("test", |_| false);
-
-        assert_eq!(
-            BrokenInvariant(State(), "test"),
-            tester.search_bfs(|_| false)
-        );
     }
 
-    #[test]
-    fn first_state_ends() {
+    mod tree {
+        use super::*;
+
         #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State();
+        pub struct State(pub usize, pub usize);
 
         impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(iter::empty())
+            type Iter = iter::Chain<iter::Once<State>, iter::Once<State>>;
+            fn get_transitions(self: Arc<Self>) -> Self::Iter {
+                iter::once(State(self.0 + 1, self.1)).chain(iter::once(State(self.0, self.1 + 1)))
             }
         }
-
-        let tester = SearchConfig::new(State());
-
-        assert_eq!(Found(State()), tester.search_bfs(|_| true));
     }
 
     #[test]
     fn chain_to_end() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize);
+        use chain::State;
 
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(iter::once(State(self.0 + 1)))
-            }
-        }
-
-        let tester = SearchConfig::new(State(0));
+        let tester = SearchConfig::new(State(0)).set_timeout(Duration::from_secs(5));
 
         assert_eq!(Found(State(10)), tester.search_bfs(|s| s == &State(10)));
     }
 
     #[test]
     fn chain_to_brake() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize);
+        use chain::State;
 
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(iter::once(State(self.0 + 1)))
-            }
-        }
-
-        let tester = SearchConfig::new(State(0)).add_invariant("test", |s| s.0 != 10);
+        let tester = SearchConfig::new(State(0))
+            .set_timeout(Duration::from_secs(5))
+            .add_invariant("test", |s| s.0 != 10);
 
         assert_eq!(
             BrokenInvariant(State(10), "test"),
@@ -219,19 +241,9 @@ mod tests {
 
     #[test]
     fn tree_to_end() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize, usize);
+        use tree::State;
 
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(
-                    iter::once(State(self.0 + 1, self.1))
-                        .chain(iter::once(State(self.0, self.1 + 1))),
-                )
-            }
-        }
-
-        let tester = SearchConfig::new(State(0, 0));
+        let tester = SearchConfig::new(State(0, 0)).set_timeout(Duration::from_secs(5));
 
         assert_eq!(
             Found(State(10, 5)),
@@ -241,19 +253,11 @@ mod tests {
 
     #[test]
     fn tree_to_break() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize, usize);
+        use tree::State;
 
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(
-                    iter::once(State(self.0 + 1, self.1))
-                        .chain(iter::once(State(self.0, self.1 + 1))),
-                )
-            }
-        }
-
-        let tester = SearchConfig::new(State(0, 0)).add_invariant("test", |s| s != &State(10, 5));
+        let tester = SearchConfig::new(State(0, 0))
+            .set_timeout(Duration::from_secs(5))
+            .add_invariant("test", |s| s != &State(10, 5));
 
         assert_eq!(
             BrokenInvariant(State(10, 5), "test"),
@@ -263,40 +267,25 @@ mod tests {
 
     #[test]
     fn multiple_invariants() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State();
+        use chain::State;
 
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(iter::empty())
-            }
-        }
-
-        let tester = SearchConfig::new(State())
+        let tester = SearchConfig::new(State(0))
+            .set_timeout(Duration::from_secs(5))
             .add_invariant("test 1", |_| true)
-            .add_invariant("test 2", |_| false);
+            .add_invariant("test 2", |s| s.0 < 1);
 
         assert_eq!(
-            BrokenInvariant(State(), "test 2"),
+            BrokenInvariant(State(1), "test 2"),
             tester.search_bfs(|_| false)
         );
     }
 
     #[test]
     fn pruning() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize, usize);
-
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(
-                    iter::once(State(self.0 + 1, self.1))
-                        .chain(iter::once(State(self.0, self.1 + 1))),
-                )
-            }
-        }
+        use tree::State;
 
         let tester = SearchConfig::new(State(0, 0))
+            .set_timeout(Duration::from_secs(5))
             .add_invariant("test", |s| s.1 != 4)
             .add_prune_condition(|s| s.1 >= 3);
 
@@ -312,6 +301,7 @@ mod tests {
         struct State(usize);
 
         impl SearchState for State {
+            type Iter = Box<dyn Iterator<Item = State>>;
             fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
                 if self.0 < 10 {
                     Box::new(iter::once(State(self.0 + 1)))
@@ -321,39 +311,29 @@ mod tests {
             }
         }
 
-        let tester = SearchConfig::new(State(0));
+        let tester = SearchConfig::new(State(0)).set_timeout(Duration::from_secs(5));
 
         assert_eq!(SpaceExhausted, tester.search_bfs(|s| s.0 > 20));
     }
 
     #[test]
     fn max_depth_exhausted() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize);
+        use chain::State;
 
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(iter::once(State(self.0 + 1)))
-            }
-        }
-
-        let tester = SearchConfig::new(State(0)).set_max_depth(10);
+        let tester = SearchConfig::new(State(0))
+            .set_timeout(Duration::from_secs(5))
+            .set_max_depth(10);
 
         assert_eq!(SpaceExhausted, tester.search_bfs(|_| false));
     }
 
     #[test]
     fn max_depth_found() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize);
+        use chain::State;
 
-        impl SearchState for State {
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                Box::new(iter::once(State(self.0 + 1)))
-            }
-        }
-
-        let tester = SearchConfig::new(State(0)).set_max_depth(10);
+        let tester = SearchConfig::new(State(0))
+            .set_timeout(Duration::from_secs(5))
+            .set_max_depth(10);
 
         assert_eq!(Found(State(10)), tester.search_bfs(|s| s == &State(10)));
     }
