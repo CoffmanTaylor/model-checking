@@ -17,11 +17,11 @@ pub trait SearchState {
 
 /// The results of preforming a search on a system.
 #[derive(Debug, PartialEq, Eq)]
-pub enum SearchResults<'a, State> {
+pub enum SearchResults<State, InvRes> {
     /// The contained State matches the end condition and is reachable from one of the starting states.
     Found(State),
     /// The contained State broke the named invariant.
-    BrokenInvariant(State, &'a str),
+    BrokenInvariant(State, InvRes),
     /// All reachable States, without going past max depth, do not match the end condition.
     SpaceExhausted,
     /// The number of states searched exceeds the maximum provided.
@@ -33,18 +33,24 @@ use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, Tim
 
 /// Defines the System that you want to search. The System contains at least one start state.
 #[derive(Clone)]
-pub struct SearchConfig<'a, S> {
+pub struct SearchConfig<S, InvRes> {
     start_states: VecDeque<Arc<S>>,
-    invariants: Vec<(fn(&S) -> bool, &'a str)>,
+    invariants: Vec<fn(&S) -> Result<(), InvRes>>,
     prune_conditions: Vec<fn(&S) -> bool>,
     max_depth: Option<usize>,
     max_states: Option<usize>,
     max_time: Option<Duration>,
 }
 
-impl<'a, S> SearchConfig<'a, S> {
+impl<S> SearchConfig<S, ()> {
+    pub fn new_without_inv(start_state: S) -> SearchConfig<S, ()> {
+        SearchConfig::new(start_state)
+    }
+}
+
+impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Constructs a new `SearchConfig` using the provided state as the only start state.
-    pub fn new(start_state: S) -> SearchConfig<'a, S> {
+    pub fn new(start_state: S) -> SearchConfig<S, InvRes> {
         let mut start_states = VecDeque::new();
         start_states.push_back(Arc::new(start_state));
         SearchConfig {
@@ -59,8 +65,8 @@ impl<'a, S> SearchConfig<'a, S> {
 
     /// Adds an invariant to the System. Every state discovered during the search, including
     /// the state states, will be checked against every invariant of the System.
-    pub fn add_invariant(mut self, name: &'a str, inv: fn(&S) -> bool) -> Self {
-        self.invariants.push((inv, name));
+    pub fn add_invariant(mut self, inv: fn(&S) -> Result<(), InvRes>) -> Self {
+        self.invariants.push(inv);
         self
     }
 
@@ -68,7 +74,7 @@ impl<'a, S> SearchConfig<'a, S> {
     /// including the state states, will be checked against every invariant of the System.
     pub fn add_invariants<I>(mut self, invs: I) -> Self
     where
-        I: IntoIterator<Item = (fn(&S) -> bool, &'a str)>,
+        I: IntoIterator<Item = fn(&S) -> Result<(), InvRes>>,
     {
         self.invariants.extend(invs);
         self
@@ -110,7 +116,7 @@ impl<'a, S> SearchConfig<'a, S> {
     ///
     /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
     /// brake invariants.
-    pub fn search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<'a, S>
+    pub fn search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<S, InvRes>
     where
         S: SearchState,
     {
@@ -146,9 +152,10 @@ impl<'a, S> SearchConfig<'a, S> {
                 }
 
                 // Check the invariants.
-                for (inv, name) in self.invariants.iter() {
-                    if !inv(&state) {
-                        return BrokenInvariant(state, name);
+                for inv in self.invariants.iter() {
+                    match inv(&state) {
+                        Ok(_) => continue,
+                        Err(res) => return BrokenInvariant(state, res),
                     }
                 }
 
@@ -216,7 +223,7 @@ mod tests {
     fn chain_to_end() {
         use chain::State;
 
-        let tester = SearchConfig::new(State(0)).set_timeout(Duration::from_secs(5));
+        let tester = SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
 
         assert_eq!(Found(State(10)), tester.search_bfs(|s| s == &State(10)));
     }
@@ -227,7 +234,7 @@ mod tests {
 
         let tester = SearchConfig::new(State(0))
             .set_timeout(Duration::from_secs(5))
-            .add_invariant("test", |s| s.0 != 10);
+            .add_invariant(|s| if s.0 != 10 { Ok(()) } else { Err("test") });
 
         assert_eq!(
             BrokenInvariant(State(10), "test"),
@@ -239,7 +246,7 @@ mod tests {
     fn tree_to_end() {
         use tree::State;
 
-        let tester = SearchConfig::new(State(0, 0)).set_timeout(Duration::from_secs(5));
+        let tester = SearchConfig::new_without_inv(State(0, 0)).set_timeout(Duration::from_secs(5));
 
         assert_eq!(
             Found(State(10, 5)),
@@ -253,7 +260,13 @@ mod tests {
 
         let tester = SearchConfig::new(State(0, 0))
             .set_timeout(Duration::from_secs(5))
-            .add_invariant("test", |s| s != &State(10, 5));
+            .add_invariant(|s| {
+                if s != &State(10, 5) {
+                    Ok(())
+                } else {
+                    Err("test")
+                }
+            });
 
         assert_eq!(
             BrokenInvariant(State(10, 5), "test"),
@@ -267,8 +280,8 @@ mod tests {
 
         let tester = SearchConfig::new(State(0))
             .set_timeout(Duration::from_secs(5))
-            .add_invariant("test 1", |_| true)
-            .add_invariant("test 2", |s| s.0 < 1);
+            .add_invariant(|_| if true { Ok(()) } else { Err("test 1") })
+            .add_invariant(|s| if s.0 < 1 { Ok(()) } else { Err("test 2") });
 
         assert_eq!(
             BrokenInvariant(State(1), "test 2"),
@@ -282,7 +295,7 @@ mod tests {
 
         let tester = SearchConfig::new(State(0, 0))
             .set_timeout(Duration::from_secs(5))
-            .add_invariant("test", |s| s.1 != 4)
+            .add_invariant(|s| if s.1 != 4 { Ok(()) } else { Err("test") })
             .add_prune_condition(|s| s.1 >= 3);
 
         assert_eq!(
@@ -307,7 +320,7 @@ mod tests {
             }
         }
 
-        let tester = SearchConfig::new(State(0)).set_timeout(Duration::from_secs(5));
+        let tester = SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
 
         assert_eq!(SpaceExhausted, tester.search_bfs(|s| s.0 > 20));
     }
@@ -316,7 +329,7 @@ mod tests {
     fn max_depth_exhausted() {
         use chain::State;
 
-        let tester = SearchConfig::new(State(0))
+        let tester = SearchConfig::new_without_inv(State(0))
             .set_timeout(Duration::from_secs(5))
             .set_max_depth(10);
 
@@ -327,7 +340,7 @@ mod tests {
     fn max_depth_found() {
         use chain::State;
 
-        let tester = SearchConfig::new(State(0))
+        let tester = SearchConfig::new_without_inv(State(0))
             .set_timeout(Duration::from_secs(5))
             .set_max_depth(10);
 
