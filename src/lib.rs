@@ -1,9 +1,11 @@
 use std::{
-    collections::{HashSet, VecDeque},
-    hash::Hash,
+    collections::VecDeque,
+    fmt::Debug,
     sync::Arc,
     time::{Duration, Instant},
 };
+
+pub mod caches;
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
 /// of the System. `get_transitions` must be deterministic and idempotent. It is a logical error if
@@ -110,7 +112,7 @@ impl<'a, S> SearchConfig<'a, S> {
     /// brake invariants.
     pub fn search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<'a, S>
     where
-        S: Eq + Hash + SearchState + Clone,
+        S: SearchState,
     {
         let mut to_search = VecDeque::new();
         to_search.extend(
@@ -119,7 +121,6 @@ impl<'a, S> SearchConfig<'a, S> {
                 .map(|s| (0, Arc::clone(s).get_transitions())),
         );
 
-        let mut already_searched = HashSet::new();
         let mut count: usize = 0;
 
         let start_time = Instant::now();
@@ -129,10 +130,6 @@ impl<'a, S> SearchConfig<'a, S> {
 
         while let Some(mut states) = to_search.pop_front() {
             while let Some(state) = states.1.next() {
-                if already_searched.contains(&state) {
-                    continue;
-                }
-
                 count += 1;
                 if last_print.elapsed() > Duration::from_secs(5) {
                     last_print = Instant::now();
@@ -165,14 +162,13 @@ impl<'a, S> SearchConfig<'a, S> {
                     continue;
                 }
 
-                // Add this state to the set of searched states.
-                let state_rc = Arc::new(state);
-                already_searched.insert(Arc::clone(&state_rc));
-
                 // Check if we are at the maximin depth.
                 if self.max_depth == Some(states.0) {
                     continue;
                 }
+
+                // Add this state to the set of searched states.
+                let state_rc = Arc::new(state);
 
                 // Add the possible transitions to the search queue.
                 to_search.push_back((states.0 + 1, Arc::clone(&state_rc).get_transitions()));
