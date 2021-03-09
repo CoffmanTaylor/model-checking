@@ -9,7 +9,8 @@ pub mod caches;
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
 /// of the System. `get_transitions` must be deterministic and idempotent. It is a logical error if
-/// two equal `SearchState`s return different results from `get_transitions`.
+/// two equal `SearchState`s return different results from `get_transitions`. The iteration order
+/// must be consistent within the same execution.
 pub trait SearchState {
     type Iter: Iterator<Item = Self>;
     fn get_transitions(self: Arc<Self>) -> Self::Iter;
@@ -20,18 +21,20 @@ pub trait SearchState {
 pub enum SearchResults<State, InvRes> {
     /// The contained State matches the end condition and is reachable from one of the starting states.
     Found(State),
-    /// The contained State broke the named invariant.
+    /// The contained State broke one of the invariants. The invariant provided InvRes as explication for
+    /// why the given state is invalid.
     BrokenInvariant(State, InvRes),
     /// All reachable States, without going past max depth, do not match the end condition.
     SpaceExhausted,
     /// The number of states searched exceeds the maximum provided.
     SearchedOverMax,
+    /// The search failed to find a State matching the end condition before exceeding the time limit.
     TimedOut,
 }
 
 use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, TimedOut};
 
-/// Defines the System that you want to search. The System contains at least one start state.
+/// Defines the System that you want to search. The System must contain at least one start state.
 #[derive(Clone)]
 pub struct SearchConfig<S, InvRes> {
     start_states: VecDeque<Arc<S>>,
@@ -43,6 +46,7 @@ pub struct SearchConfig<S, InvRes> {
 }
 
 impl<S> SearchConfig<S, ()> {
+    /// Constructs a new `SearchConfig` with no return type of invariants.
     pub fn new_without_inv(start_state: S) -> SearchConfig<S, ()> {
         SearchConfig::new(start_state)
     }
@@ -63,15 +67,33 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         }
     }
 
-    /// Adds an invariant to the System. Every state discovered during the search, including
-    /// the state states, will be checked against every invariant of the System.
+    /// Add the given State as a possible start state. When searching, all possible start
+    /// States are considered.
+    pub fn add_start_state(mut self, start_state: S) -> Self {
+        self.start_states.push_back(Arc::new(start_state));
+        self
+    }
+
+    /// Add all of the given States as possible start states. When searching, all possible
+    /// start States are considered.
+    pub fn add_start_states<I>(mut self, start_states: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+    {
+        self.start_states
+            .extend(start_states.into_iter().map(Arc::new));
+        self
+    }
+
+    /// Adds an invariant to the System. Every state discovered during the search, excluding
+    /// the start States, will be checked against every invariant of the System.
     pub fn add_invariant(mut self, inv: fn(&S) -> Result<(), InvRes>) -> Self {
         self.invariants.push(inv);
         self
     }
 
     /// Adds a collection of invariants to the System. Every state discovered during the search,
-    /// including the state states, will be checked against every invariant of the System.
+    /// excluding the start States, will be checked against every invariant of the System.
     pub fn add_invariants<I>(mut self, invs: I) -> Self
     where
         I: IntoIterator<Item = fn(&S) -> Result<(), InvRes>>,
@@ -84,6 +106,8 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// any of the pruning conditions, none of that state's transitions will be searched. This
     /// is helpful for speeding up searches when you know there are states that once you reach,
     /// you know you wont find the end condition afterwards.
+    ///
+    /// Note: The start States are not checked against the prune conditions.
     pub fn add_prune_condition(mut self, prune_condition: fn(&S) -> bool) -> Self {
         self.prune_conditions.push(prune_condition);
         self
@@ -99,20 +123,28 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         self
     }
 
+    /// Sets the maximum number of States to search. If the end condition cannot be found before
+    /// reaching the maximum, a `SearchResult::SearchedOfMax` will be returned.
+    ///
+    /// Default to no maximum.
     pub fn set_max_number_of_states(mut self, max_states: usize) -> Self {
         self.max_states = Some(max_states);
         self
     }
 
+    /// Sets the maximum time for the search. If the end condition cannot be found before exceeding
+    /// the given duration, a `SearchResult::TimedOut` will be returned.
+    ///
+    /// Default to no maximum.
     pub fn set_timeout(mut self, timeout: Duration) -> Self {
         self.max_time = Some(timeout);
         self
     }
 
-    /// Preforms a Breath First Search on the System looking for the a state that matches the given
-    /// end condition. If a matching state is found, it is returned in `Found(State)`. If any of the
-    /// System's invariants are violated, then the state that failed and the name of the invariant
-    /// are returned as `BrokenInvariant(State, name)`.
+    /// Preforms a Breath First Search on the System looking for a State that matches the given
+    /// end condition. If a matching State is found, it is returned in `Found(State)`. If any of the
+    /// System's invariants are violated, then the State that failed and result of the invariant
+    /// are returned as `BrokenInvariant(State, ResInv)`.
     ///
     /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
     /// brake invariants.
