@@ -216,6 +216,75 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
         SpaceExhausted
     }
+
+    pub fn parallel_search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<S, InvRes>
+    where
+        S: SearchState,
+    {
+        let mut to_search = VecDeque::new();
+        to_search.extend(
+            self.start_states
+                .iter()
+                .map(|s| (0, Arc::clone(s).get_transitions())),
+        );
+
+        let mut count: usize = 0;
+
+        let start_time = Instant::now();
+        let mut last_print = start_time.clone();
+
+        println!("Starting search...");
+
+        while let Some(mut states) = to_search.pop_front() {
+            while let Some(state) = states.1.next() {
+                count += 1;
+                if last_print.elapsed() > Duration::from_secs(5) {
+                    last_print = Instant::now();
+                    println!("Searched {} states, Current depth: {}", count, states.0);
+                }
+                if self.max_states.is_some() && Some(count) > self.max_states {
+                    return SearchedOverMax;
+                }
+
+                if let Some(timeout) = self.max_time {
+                    if start_time.elapsed() > timeout {
+                        return TimedOut;
+                    }
+                }
+
+                // Check the invariants.
+                for inv in self.invariants.iter() {
+                    match inv(&state) {
+                        Ok(_) => continue,
+                        Err(res) => return BrokenInvariant(state, res),
+                    }
+                }
+
+                // Check the end condition.
+                if end_condition(&state) {
+                    return Found(state);
+                }
+
+                // Check if the state should be pruned
+                if self.prune_conditions.iter().any(|f| f(&state)) {
+                    continue;
+                }
+
+                // Check if we are at the maximin depth.
+                if self.max_depth == Some(states.0) {
+                    continue;
+                }
+
+                // Add this state to the set of searched states.
+                let state_rc = Arc::new(state);
+
+                // Add the possible transitions to the search queue.
+                to_search.push_back((states.0 + 1, Arc::clone(&state_rc).get_transitions()));
+            }
+        }
+
+        SpaceExhausted
+    }
 }
 
 #[cfg(test)]
@@ -251,131 +320,241 @@ mod tests {
         }
     }
 
-    #[test]
-    fn chain_to_end() {
-        use chain::State;
+    mod chain_to_end {
+        use super::*;
 
-        let tester = SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use chain::State;
 
-        assert_eq!(Found(State(10)), tester.search_bfs(|s| s == &State(10)));
-    }
+                        let tester =
+                            SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
 
-    #[test]
-    fn chain_to_brake() {
-        use chain::State;
-
-        let tester = SearchConfig::new(State(0))
-            .set_timeout(Duration::from_secs(5))
-            .add_invariant(|s| if s.0 != 10 { Ok(()) } else { Err("test") });
-
-        assert_eq!(
-            BrokenInvariant(State(10), "test"),
-            tester.search_bfs(|_| false)
-        );
-    }
-
-    #[test]
-    fn tree_to_end() {
-        use tree::State;
-
-        let tester = SearchConfig::new_without_inv(State(0, 0)).set_timeout(Duration::from_secs(5));
-
-        assert_eq!(
-            Found(State(10, 5)),
-            tester.search_bfs(|s| s == &State(10, 5))
-        );
-    }
-
-    #[test]
-    fn tree_to_break() {
-        use tree::State;
-
-        let tester = SearchConfig::new(State(0, 0))
-            .set_timeout(Duration::from_secs(5))
-            .add_invariant(|s| {
-                if s != &State(10, 5) {
-                    Ok(())
-                } else {
-                    Err("test")
-                }
-            });
-
-        assert_eq!(
-            BrokenInvariant(State(10, 5), "test"),
-            tester.search_bfs(|_| false)
-        );
-    }
-
-    #[test]
-    fn multiple_invariants() {
-        use chain::State;
-
-        let tester = SearchConfig::new(State(0))
-            .set_timeout(Duration::from_secs(5))
-            .add_invariant(|_| if true { Ok(()) } else { Err("test 1") })
-            .add_invariant(|s| if s.0 < 1 { Ok(()) } else { Err("test 2") });
-
-        assert_eq!(
-            BrokenInvariant(State(1), "test 2"),
-            tester.search_bfs(|_| false)
-        );
-    }
-
-    #[test]
-    fn pruning() {
-        use tree::State;
-
-        let tester = SearchConfig::new(State(0, 0))
-            .set_timeout(Duration::from_secs(5))
-            .add_invariant(|s| if s.1 != 4 { Ok(()) } else { Err("test") })
-            .add_prune_condition(|s| s.1 >= 3);
-
-        assert_eq!(
-            Found(State(10, 0)),
-            tester.search_bfs(|s| s == &State(10, 0))
-        );
-    }
-
-    #[test]
-    fn bounded_space() {
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        struct State(usize);
-
-        impl SearchState for State {
-            type Iter = Box<dyn Iterator<Item = State>>;
-            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                if self.0 < 10 {
-                    Box::new(iter::once(State(self.0 + 1)))
-                } else {
-                    Box::new(iter::empty())
-                }
-            }
+                        assert_eq!(Found(State(100)), tester.$func(|s| s == &State(100)));
+                    }
+                )+
+            };
         }
 
-        let tester = SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
-
-        assert_eq!(SpaceExhausted, tester.search_bfs(|s| s.0 > 20));
+        define_tests!(search_bfs, parallel_search_bfs);
     }
 
-    #[test]
-    fn max_depth_exhausted() {
-        use chain::State;
+    mod chain_to_brake {
+        use super::*;
 
-        let tester = SearchConfig::new_without_inv(State(0))
-            .set_timeout(Duration::from_secs(5))
-            .set_max_depth(10);
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use chain::State;
 
-        assert_eq!(SpaceExhausted, tester.search_bfs(|_| false));
+                        let tester = SearchConfig::new(State(0))
+                            .set_timeout(Duration::from_secs(5))
+                            .add_invariant(|s| if s.0 != 10 { Ok(()) } else { Err("test") });
+
+                        assert_eq!(
+                            BrokenInvariant(State(10), "test"),
+                            tester.$func(|_| false)
+                        );
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
     }
 
-    #[test]
-    fn max_depth_found() {
-        use chain::State;
+    mod tree_to_end {
+        use super::*;
 
-        let tester = SearchConfig::new_without_inv(State(0))
-            .set_timeout(Duration::from_secs(5))
-            .set_max_depth(10);
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use tree::State;
 
-        assert_eq!(Found(State(10)), tester.search_bfs(|s| s == &State(10)));
+                        let tester = SearchConfig::new_without_inv(State(0, 0)).set_timeout(Duration::from_secs(5));
+
+                        assert_eq!(
+                            Found(State(10, 5)),
+                            tester.$func(|s| s == &State(10, 5))
+                        );
+                    }
+                )+
+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
+    }
+
+    mod tree_to_break {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use tree::State;
+
+                        let tester = SearchConfig::new(State(0, 0))
+                            .set_timeout(Duration::from_secs(5))
+                            .add_invariant(|s| {
+                                if s != &State(10, 5) {
+                                    Ok(())
+                                } else {
+                                    Err("test")
+                                }
+                            });
+
+                        assert_eq!(
+                            BrokenInvariant(State(10, 5), "test"),
+                            tester.$func(|_| false)
+                        );
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
+    }
+
+    mod multiple_invariants {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use chain::State;
+
+                        let tester = SearchConfig::new(State(0))
+                            .set_timeout(Duration::from_secs(5))
+                            .add_invariant(|_| if true { Ok(()) } else { Err("test 1") })
+                            .add_invariant(|s| if s.0 < 1 { Ok(()) } else { Err("test 2") });
+
+                        assert_eq!(
+                            BrokenInvariant(State(1), "test 2"),
+                            tester.$func(|_| false)
+                        );
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
+    }
+
+    mod pruning {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use tree::State;
+
+                        let tester = SearchConfig::new(State(0, 0))
+                            .set_timeout(Duration::from_secs(5))
+                            .add_invariant(|s| if s.1 != 4 { Ok(()) } else { Err("test") })
+                            .add_prune_condition(|s| s.1 >= 3);
+
+                        assert_eq!(
+                            Found(State(10, 0)),
+                            tester.$func(|s| s == &State(10, 0))
+                        );
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
+    }
+
+    mod bounded_space {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
+                        struct State(usize);
+
+                        impl SearchState for State {
+                            type Iter = Box<dyn Iterator<Item = State>>;
+                            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
+                                if self.0 < 10 {
+                                    Box::new(iter::once(State(self.0 + 1)))
+                                } else {
+                                    Box::new(iter::empty())
+                                }
+                            }
+                        }
+
+                        let tester = SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
+
+                        assert_eq!(SpaceExhausted, tester.$func(|s| s.0 > 20));
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
+    }
+
+    mod max_depth_exhausted {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use chain::State;
+
+                        let tester = SearchConfig::new_without_inv(State(0))
+                            .set_timeout(Duration::from_secs(5))
+                            .set_max_depth(10);
+
+                        assert_eq!(SpaceExhausted, tester.$func(|_| false));
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
+    }
+
+    mod max_depth_found {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use chain::State;
+
+                        let tester = SearchConfig::new_without_inv(State(0))
+                            .set_timeout(Duration::from_secs(5))
+                            .set_max_depth(10);
+
+                        assert_eq!(Found(State(10)), tester.$func(|s| s == &State(10)));
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs, parallel_search_bfs);
     }
 }
