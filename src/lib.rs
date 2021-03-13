@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, TimedOut};
+
 pub mod caches;
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
@@ -31,8 +33,6 @@ pub enum SearchResults<State, InvRes> {
     /// The search failed to find a State matching the end condition before exceeding the time limit.
     TimedOut,
 }
-
-use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, TimedOut};
 
 /// Defines the System that you want to search. The System must contain at least one start state.
 #[derive(Clone)]
@@ -216,75 +216,6 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
         SpaceExhausted
     }
-
-    pub fn parallel_search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<S, InvRes>
-    where
-        S: SearchState,
-    {
-        let mut to_search = VecDeque::new();
-        to_search.extend(
-            self.start_states
-                .iter()
-                .map(|s| (0, Arc::clone(s).get_transitions())),
-        );
-
-        let mut count: usize = 0;
-
-        let start_time = Instant::now();
-        let mut last_print = start_time.clone();
-
-        println!("Starting search...");
-
-        while let Some(mut states) = to_search.pop_front() {
-            while let Some(state) = states.1.next() {
-                count += 1;
-                if last_print.elapsed() > Duration::from_secs(5) {
-                    last_print = Instant::now();
-                    println!("Searched {} states, Current depth: {}", count, states.0);
-                }
-                if self.max_states.is_some() && Some(count) > self.max_states {
-                    return SearchedOverMax;
-                }
-
-                if let Some(timeout) = self.max_time {
-                    if start_time.elapsed() > timeout {
-                        return TimedOut;
-                    }
-                }
-
-                // Check the invariants.
-                for inv in self.invariants.iter() {
-                    match inv(&state) {
-                        Ok(_) => continue,
-                        Err(res) => return BrokenInvariant(state, res),
-                    }
-                }
-
-                // Check the end condition.
-                if end_condition(&state) {
-                    return Found(state);
-                }
-
-                // Check if the state should be pruned
-                if self.prune_conditions.iter().any(|f| f(&state)) {
-                    continue;
-                }
-
-                // Check if we are at the maximin depth.
-                if self.max_depth == Some(states.0) {
-                    continue;
-                }
-
-                // Add this state to the set of searched states.
-                let state_rc = Arc::new(state);
-
-                // Add the possible transitions to the search queue.
-                to_search.push_back((states.0 + 1, Arc::clone(&state_rc).get_transitions()));
-            }
-        }
-
-        SpaceExhausted
-    }
 }
 
 #[cfg(test)]
@@ -339,7 +270,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod chain_to_brake {
@@ -365,7 +296,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod tree_to_end {
@@ -390,7 +321,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod tree_to_break {
@@ -422,7 +353,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod multiple_invariants {
@@ -449,7 +380,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod pruning {
@@ -476,7 +407,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod bounded_space {
@@ -509,7 +440,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod max_depth_exhausted {
@@ -532,7 +463,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 
     mod max_depth_found {
@@ -555,6 +486,6 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs, parallel_search_bfs);
+        define_tests!(search_bfs);
     }
 }
