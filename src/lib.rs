@@ -159,26 +159,37 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 .map(|s| (0, Arc::clone(s).get_transitions())),
         );
 
-        let mut count: usize = 0;
+        let mut count = 0;
+        let mut last_count = 0;
+        let mut max_depth = 0;
 
         let start_time = Instant::now();
         let mut last_print = start_time.clone();
 
         println!("Starting search...");
 
-        while let Some(mut states) = to_search.pop_front() {
-            while let Some(state) = states.1.next() {
+        while let Some((depth, mut states)) = to_search.pop_front() {
+            max_depth = usize::max(depth, max_depth);
+            while let Some(state) = states.next() {
                 count += 1;
                 if last_print.elapsed() > Duration::from_secs(5) {
                     last_print = Instant::now();
-                    println!("Searched {} states, Current depth: {}", count, states.0);
+                    println!(
+                        "Current depth: {}, Searched {}k states, At a rate of {:.2}k states per second.",
+                        depth,
+                        count / 1000,
+                        (count - last_count) as f32 / 5000.0
+                    );
+                    last_count = count;
                 }
                 if self.max_states.is_some() && Some(count) > self.max_states {
+                    print_search_completion(count, max_depth, start_time.elapsed());
                     return SearchedOverMax;
                 }
 
                 if let Some(timeout) = self.max_time {
                     if start_time.elapsed() > timeout {
+                        print_search_completion(count, max_depth, start_time.elapsed());
                         return TimedOut;
                     }
                 }
@@ -187,12 +198,16 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 for inv in self.invariants.iter() {
                     match inv(&state) {
                         Ok(_) => continue,
-                        Err(res) => return BrokenInvariant(state, res),
+                        Err(res) => {
+                            print_search_completion(count, max_depth, start_time.elapsed());
+                            return BrokenInvariant(state, res);
+                        }
                     }
                 }
 
                 // Check the end condition.
                 if end_condition(&state) {
+                    print_search_completion(count, max_depth, start_time.elapsed());
                     return Found(state);
                 }
 
@@ -202,7 +217,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 }
 
                 // Check if we are at the maximin depth.
-                if self.max_depth == Some(states.0) {
+                if self.max_depth == Some(depth) {
                     continue;
                 }
 
@@ -210,12 +225,22 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 let state_rc = Arc::new(state);
 
                 // Add the possible transitions to the search queue.
-                to_search.push_back((states.0 + 1, Arc::clone(&state_rc).get_transitions()));
+                to_search.push_back((depth + 1, Arc::clone(&state_rc).get_transitions()));
             }
         }
 
+        print_search_completion(count, max_depth, start_time.elapsed());
         SpaceExhausted
     }
+}
+
+fn print_search_completion(count: usize, depth: usize, length: Duration) {
+    println!(
+        "Search complete. Searched {} states, To a max depth of {}, in {:.3} seconds.",
+        count,
+        depth,
+        length.as_secs_f32()
+    );
 }
 
 #[cfg(test)]
