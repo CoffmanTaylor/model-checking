@@ -108,6 +108,8 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// you know you wont find the end condition afterwards.
     ///
     /// Note: The start States are not checked against the prune conditions.
+    ///
+    /// Note: Invariants and the end condition are checked before the state is considered for pruning.
     pub fn add_prune_condition(mut self, prune_condition: fn(&S) -> bool) -> Self {
         self.prune_conditions.push(prune_condition);
         self
@@ -152,6 +154,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     where
         S: SearchState,
     {
+        // Setup the to_search queue with all of the possible transitions from the starting states.
         let mut to_search = VecDeque::new();
         to_search.extend(
             self.start_states
@@ -159,10 +162,10 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 .map(|s| (0, Arc::clone(s).get_transitions())),
         );
 
+        // Variables used for printing statistics and determining if we have gone passed a search constraint.
         let mut count = 0;
         let mut last_count = 0;
         let mut max_depth = 0;
-
         let start_time = Instant::now();
         let mut last_print = start_time.clone();
 
@@ -170,8 +173,11 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
         while let Some((depth, mut states)) = to_search.pop_front() {
             max_depth = usize::max(depth, max_depth);
+
             while let Some(state) = states.next() {
                 count += 1;
+
+                // Check if we should print active statistics.
                 if last_print.elapsed() > Duration::from_secs(5) {
                     last_print = Instant::now();
                     println!(
@@ -182,11 +188,14 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                     );
                     last_count = count;
                 }
+
+                // Check if we have searched more states than the user requested.
                 if self.max_states.is_some() && Some(count) > self.max_states {
                     print_search_completion(count, max_depth, start_time.elapsed());
                     return SearchedOverMax;
                 }
 
+                // Check if we have searched for longer time than the user requested.
                 if let Some(timeout) = self.max_time {
                     if start_time.elapsed() > timeout {
                         print_search_completion(count, max_depth, start_time.elapsed());
@@ -221,19 +230,19 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                     continue;
                 }
 
-                // Add this state to the set of searched states.
-                let state_rc = Arc::new(state);
-
                 // Add the possible transitions to the search queue.
-                to_search.push_back((depth + 1, Arc::clone(&state_rc).get_transitions()));
+                to_search.push_back((depth + 1, Arc::new(state).get_transitions()));
             }
         }
 
+        // If we reach here, that means we have either emptied the to_search queue or have searched over
+        // the requested number of states the user requested.
         print_search_completion(count, max_depth, start_time.elapsed());
         SpaceExhausted
     }
 }
 
+/// Print some statistics about the search.
 fn print_search_completion(count: usize, depth: usize, length: Duration) {
     println!(
         "Search complete. Searched {} states, To a max depth of {}, in {:.3} seconds.",
@@ -290,6 +299,31 @@ mod tests {
                             SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
 
                         assert_eq!(Found(State(100)), tester.$func(|s| s == &State(100)));
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs);
+    }
+
+    mod check_inv_before_pruning {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use chain::State;
+
+                        let tester =
+                            SearchConfig::new(State(0))
+                                .set_timeout(Duration::from_secs(5))
+                                .add_invariant(|s| if s == &State(10) { Err(()) } else { Ok(()) })
+                                .add_prune_condition(|s| s == &State(10));
+
+                        assert_eq!(BrokenInvariant(State(10), ()), tester.$func(|s| s == &State(100)));
                     }
                 )+
             };
