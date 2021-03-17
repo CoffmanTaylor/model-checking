@@ -60,4 +60,20 @@ where
                 }
             }))
     }
+
+    fn clear_shared_state(&mut self) {
+        self.last = Arc::new(Mutex::new(0));
+        self.this = 0;
+        self.from = 0;
+    }
+
+    fn merge_shared_state(&mut self, other: &mut Self) {
+        let mut last = self.last.lock().unwrap();
+        let other_this = last.add(1);
+        last.add_assign(1);
+
+        other.from = 0;
+        other.this = other_this;
+        other.last = Arc::clone(&self.last);
+    }
 }

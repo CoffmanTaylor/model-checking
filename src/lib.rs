@@ -10,12 +10,28 @@ use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, Tim
 pub mod wrappers;
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
-/// of the System. `get_transitions` must be deterministic and idempotent. It is a logical error if
-/// two equal `SearchState`s return different results from `get_transitions`. The iteration order
-/// must be consistent within the same execution.
+/// of the System.
 pub trait SearchState {
     type Iter: Iterator<Item = Self>;
+
+    /// Get all possible states that can be reached in one 'step' from this state. The order and content
+    /// of the returned iterator MUST be deterministic and consistent within the same compilation. Must
+    /// be idempotent.
     fn get_transitions(self: Arc<Self>) -> Self::Iter;
+
+    /// If this type contains any shared data, this function will merge the shared data between the two
+    /// given states.
+    ///
+    /// Note: Any shared state MUST not effect equality, hash value, ordering, and results
+    /// of get_transitions. It is a logical error if it does.
+    fn merge_shared_state(&mut self, _other: &mut Self) {}
+
+    /// If this type contains any shared data, this function will restore the value of the shared data
+    /// to the starting value. It will also un-merge any merged states.
+    ///
+    /// Note: Any shared state MUST not effect equality, hash value, ordering, and results
+    /// of get_transitions. It is a logical error if it does.
+    fn clear_shared_state(&mut self) {}
 }
 
 /// Statistics of the completed search.
@@ -45,7 +61,7 @@ pub enum SearchResults<State, InvRes> {
 /// Defines the System that you want to search. The System must contain at least one start state.
 #[derive(Clone)]
 pub struct SearchConfig<S, InvRes> {
-    start_states: VecDeque<Arc<S>>,
+    start_states: VecDeque<S>,
     invariants: Vec<fn(&S) -> Result<(), InvRes>>,
     prune_conditions: Vec<fn(&S) -> bool>,
     max_depth: Option<usize>,
@@ -64,7 +80,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Constructs a new `SearchConfig` using the provided state as the only start state.
     pub fn new(start_state: S) -> SearchConfig<S, InvRes> {
         let mut start_states = VecDeque::new();
-        start_states.push_back(Arc::new(start_state));
+        start_states.push_back(start_state);
         SearchConfig {
             start_states,
             invariants: Vec::new(),
@@ -78,7 +94,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Add the given State as a possible start state. When searching, all possible start
     /// States are considered.
     pub fn add_start_state(mut self, start_state: S) -> Self {
-        self.start_states.push_back(Arc::new(start_state));
+        self.start_states.push_back(start_state);
         self
     }
 
@@ -88,8 +104,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     where
         I: IntoIterator<Item = S>,
     {
-        self.start_states
-            .extend(start_states.into_iter().map(Arc::new));
+        self.start_states.extend(start_states.into_iter());
         self
     }
 
@@ -163,15 +178,32 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         end_condition: fn(&S) -> bool,
     ) -> (SearchResults<S, InvRes>, SearchStatistics)
     where
-        S: SearchState,
+        S: SearchState + Clone,
     {
+        println!("Starting search...");
+
         // Setup the to_search queue with all of the possible transitions from the starting states.
-        let mut to_search = VecDeque::new();
-        to_search.extend(
-            self.start_states
-                .iter()
-                .map(|s| (1, Arc::clone(s).get_transitions())),
-        );
+        let mut to_search: VecDeque<_> = {
+            let mut tmp = Vec::new();
+
+            // Setup the first state
+            let mut start_state = self.start_states[0].clone();
+            start_state.clear_shared_state();
+            tmp.push(start_state);
+
+            // merge the shared states of all of the other start states.
+            for (i, state) in self.start_states.iter().enumerate().skip(1) {
+                let mut state = state.clone();
+                state.clear_shared_state();
+                tmp[i - 1].merge_shared_state(&mut state);
+                tmp.push(state);
+            }
+
+            // Create the vec of transitions.
+            tmp.into_iter()
+                .map(|s| (1, Arc::new(s).get_transitions()))
+                .collect()
+        };
 
         // Variables used for printing statistics and determining if we have gone passed a search constraint.
         let mut count = 0;
@@ -179,8 +211,6 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         let mut max_depth = 0;
         let start_time = Instant::now();
         let mut last_print = start_time.clone();
-
-        println!("Starting search...");
 
         while let Some((depth, mut states)) = to_search.pop_front() {
             max_depth = usize::max(depth, max_depth);
@@ -612,5 +642,78 @@ mod tests {
         }
 
         define_tests!(search_bfs);
+    }
+
+    mod shared_state {
+        use std::{iter::Once, ops::AddAssign, sync::Mutex};
+
+        use super::*;
+
+        #[derive(Clone)]
+        struct State {
+            shared: Arc<Mutex<usize>>,
+            private: usize,
+        }
+
+        impl State {
+            fn new() -> State {
+                State {
+                    shared: Arc::new(Mutex::new(1)),
+                    private: 1,
+                }
+            }
+        }
+
+        impl SearchState for State {
+            type Iter = Once<State>;
+
+            fn get_transitions(self: Arc<Self>) -> Self::Iter {
+                self.shared.lock().unwrap().add_assign(1);
+                iter::once(State {
+                    shared: Arc::clone(&self.shared),
+                    private: self.private + 1,
+                })
+            }
+
+            fn clear_shared_state(&mut self) {
+                self.shared = Arc::new(Mutex::new(1));
+            }
+
+            fn merge_shared_state(&mut self, other: &mut Self) {
+                // Add the count from other into self.
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .add_assign(other.shared.lock().unwrap().clone());
+
+                // link self's count to other.
+                other.shared = Arc::clone(&self.shared);
+            }
+        }
+
+        #[test]
+        fn single_shared_state() {
+            let (res, _) =
+                SearchConfig::new_without_inv(State::new()).search_bfs(|s| s.private == 10);
+
+            if let Found(state) = res {
+                assert_eq!(10, state.shared.lock().unwrap().clone());
+            } else {
+                panic!("Test failed");
+            }
+        }
+
+        #[test]
+        fn dual_shared_state() {
+            let (res, _) = SearchConfig::new_without_inv(State::new())
+                .add_start_state(State::new())
+                .search_bfs(|s| s.private == 10);
+
+            if let Found(state) = res {
+                assert_eq!(20, state.shared.lock().unwrap().clone());
+            } else {
+                panic!("Test failed");
+            }
+        }
     }
 }

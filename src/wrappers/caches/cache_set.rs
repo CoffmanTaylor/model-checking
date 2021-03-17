@@ -1,4 +1,3 @@
-
 use std::{
     collections::HashSet,
     fmt::Debug,
@@ -68,5 +67,13 @@ where
                     None
                 }
             }))
+    }
+
+    fn clear_shared_state(&mut self) {
+        self.already_searched = Arc::new(Mutex::new(HashSet::new()));
+    }
+
+    fn merge_shared_state(&mut self, other: &mut Self) {
+        other.already_searched = Arc::clone(&self.already_searched);
     }
 }
