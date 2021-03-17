@@ -7,7 +7,7 @@ use std::{
 
 use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, TimedOut};
 
-pub mod caches;
+pub mod wrappers;
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
 /// of the System. `get_transitions` must be deterministic and idempotent. It is a logical error if
@@ -159,7 +159,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         to_search.extend(
             self.start_states
                 .iter()
-                .map(|s| (0, Arc::clone(s).get_transitions())),
+                .map(|s| (1, Arc::clone(s).get_transitions())),
         );
 
         // Variables used for printing statistics and determining if we have gone passed a search constraint.
