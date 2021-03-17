@@ -18,6 +18,14 @@ pub trait SearchState {
     fn get_transitions(self: Arc<Self>) -> Self::Iter;
 }
 
+/// Statistics of the completed search.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SearchStatistics {
+    pub number_of_states: usize,
+    pub max_depth: usize,
+    pub total_time: Duration,
+}
+
 /// The results of preforming a search on a system.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SearchResults<State, InvRes> {
@@ -150,7 +158,10 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     ///
     /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
     /// brake invariants.
-    pub fn search_bfs(&self, end_condition: fn(&S) -> bool) -> SearchResults<S, InvRes>
+    pub fn search_bfs(
+        &self,
+        end_condition: fn(&S) -> bool,
+    ) -> (SearchResults<S, InvRes>, SearchStatistics)
     where
         S: SearchState,
     {
@@ -191,15 +202,29 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
                 // Check if we have searched more states than the user requested.
                 if self.max_states.is_some() && Some(count) > self.max_states {
-                    print_search_completion(count, max_depth, start_time.elapsed());
-                    return SearchedOverMax;
+                    println!("Search Complete");
+                    return (
+                        SearchedOverMax,
+                        SearchStatistics {
+                            max_depth,
+                            number_of_states: count,
+                            total_time: start_time.elapsed(),
+                        },
+                    );
                 }
 
                 // Check if we have searched for longer time than the user requested.
                 if let Some(timeout) = self.max_time {
                     if start_time.elapsed() > timeout {
-                        print_search_completion(count, max_depth, start_time.elapsed());
-                        return TimedOut;
+                        println!("Search Complete");
+                        return (
+                            TimedOut,
+                            SearchStatistics {
+                                max_depth,
+                                number_of_states: count,
+                                total_time: start_time.elapsed(),
+                            },
+                        );
                     }
                 }
 
@@ -208,16 +233,30 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                     match inv(&state) {
                         Ok(_) => continue,
                         Err(res) => {
-                            print_search_completion(count, max_depth, start_time.elapsed());
-                            return BrokenInvariant(state, res);
+                            println!("Search Complete");
+                            return (
+                                BrokenInvariant(state, res),
+                                SearchStatistics {
+                                    max_depth,
+                                    number_of_states: count,
+                                    total_time: start_time.elapsed(),
+                                },
+                            );
                         }
                     }
                 }
 
                 // Check the end condition.
                 if end_condition(&state) {
-                    print_search_completion(count, max_depth, start_time.elapsed());
-                    return Found(state);
+                    println!("Search Complete");
+                    return (
+                        Found(state),
+                        SearchStatistics {
+                            max_depth,
+                            number_of_states: count,
+                            total_time: start_time.elapsed(),
+                        },
+                    );
                 }
 
                 // Check if the state should be pruned
@@ -237,19 +276,17 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
         // If we reach here, that means we have either emptied the to_search queue or have searched over
         // the requested number of states the user requested.
-        print_search_completion(count, max_depth, start_time.elapsed());
-        SpaceExhausted
-    }
-}
+        println!("Search Complete");
 
-/// Print some statistics about the search.
-fn print_search_completion(count: usize, depth: usize, length: Duration) {
-    println!(
-        "Search complete. Searched {} states, To a max depth of {}, in {:.3} seconds.",
-        count,
-        depth,
-        length.as_secs_f32()
-    );
+        (
+            SpaceExhausted,
+            SearchStatistics {
+                max_depth,
+                number_of_states: count,
+                total_time: start_time.elapsed(),
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -298,7 +335,9 @@ mod tests {
                         let tester =
                             SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
 
-                        assert_eq!(Found(State(100)), tester.$func(|s| s == &State(100)));
+                        let (res, _) = tester.$func(|s| s == &State(100));
+
+                        assert_eq!(Found(State(100)), res);
                     }
                 )+
             };
@@ -323,7 +362,7 @@ mod tests {
                                 .add_invariant(|s| if s == &State(10) { Err(()) } else { Ok(()) })
                                 .add_prune_condition(|s| s == &State(10));
 
-                        assert_eq!(BrokenInvariant(State(10), ()), tester.$func(|s| s == &State(100)));
+                        assert_eq!(BrokenInvariant(State(10), ()), tester.$func(|s| s == &State(100)).0);
                     }
                 )+
             };
@@ -348,7 +387,7 @@ mod tests {
 
                         assert_eq!(
                             BrokenInvariant(State(10), "test"),
-                            tester.$func(|_| false)
+                            tester.$func(|_| false).0
                         );
                     }
                 )+
@@ -372,7 +411,7 @@ mod tests {
 
                         assert_eq!(
                             Found(State(10, 5)),
-                            tester.$func(|s| s == &State(10, 5))
+                            tester.$func(|s| s == &State(10, 5)).0
                         );
                     }
                 )+
@@ -405,7 +444,7 @@ mod tests {
 
                         assert_eq!(
                             BrokenInvariant(State(10, 5), "test"),
-                            tester.$func(|_| false)
+                            tester.$func(|_| false).0
                         );
                     }
                 )+
@@ -432,7 +471,7 @@ mod tests {
 
                         assert_eq!(
                             BrokenInvariant(State(1), "test 2"),
-                            tester.$func(|_| false)
+                            tester.$func(|_| false).0
                         );
                     }
                 )+
@@ -459,7 +498,7 @@ mod tests {
 
                         assert_eq!(
                             Found(State(10, 0)),
-                            tester.$func(|s| s == &State(10, 0))
+                            tester.$func(|s| s == &State(10, 0)).0
                         );
                     }
                 )+
@@ -493,7 +532,7 @@ mod tests {
 
                         let tester = SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
 
-                        assert_eq!(SpaceExhausted, tester.$func(|s| s.0 > 20));
+                        assert_eq!(SpaceExhausted, tester.$func(|s| s.0 > 20).0);
                     }
                 )+
             };
@@ -516,7 +555,10 @@ mod tests {
                             .set_timeout(Duration::from_secs(5))
                             .set_max_depth(10);
 
-                        assert_eq!(SpaceExhausted, tester.$func(|_| false));
+                        let (res, stats) = tester.$func(|_| false);
+
+                        assert_eq!(SpaceExhausted, res);
+                        assert_eq!(10, stats.number_of_states);
                     }
                 )+
             };
@@ -539,7 +581,31 @@ mod tests {
                             .set_timeout(Duration::from_secs(5))
                             .set_max_depth(10);
 
-                        assert_eq!(Found(State(10)), tester.$func(|s| s == &State(10)));
+                        assert_eq!(Found(State(10)), tester.$func(|s| s == &State(10)).0);
+                    }
+                )+
+            };
+        }
+
+        define_tests!(search_bfs);
+    }
+
+    mod can_reuse_searcher {
+        use super::*;
+
+        macro_rules! define_tests {
+            ($( $func:ident ),+) => {
+                $(
+                    #[test]
+                    fn $func() {
+                        use chain::State;
+
+                        let tester = SearchConfig::new_without_inv(State(0))
+                            .set_timeout(Duration::from_secs(5))
+                            .set_max_depth(10);
+
+                        assert_eq!(Found(State(10)), tester.clone().$func(|s| s == &State(10)).0);
+                        assert_eq!(Found(State(10)), tester.clone().$func(|s| s == &State(10)).0);
                     }
                 )+
             };
