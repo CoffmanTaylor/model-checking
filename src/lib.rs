@@ -173,6 +173,9 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     ///
     /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
     /// brake invariants.
+    ///
+    /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
+    /// of the search with vs. without optimizations.
     pub fn search_bfs(
         &self,
         end_condition: fn(&S) -> bool,
@@ -713,6 +716,27 @@ mod tests {
                 assert_eq!(20, state.shared.lock().unwrap().clone());
             } else {
                 panic!("Test failed");
+            }
+        }
+
+        #[test]
+        fn can_reuse_search_with_shared_state() {
+            let searcher = SearchConfig::new_without_inv(State::new());
+
+            let (res, _) = searcher.search_bfs(|s| s.private == 10);
+
+            if let Found(state) = res {
+                assert_eq!(10, state.shared.lock().unwrap().clone(), "Failed first use");
+            } else {
+                panic!("Test failed: first use");
+            }
+
+            let (res, _) = searcher.search_bfs(|s| s.private == 5);
+
+            if let Found(state) = res {
+                assert_eq!(5, state.shared.lock().unwrap().clone(), "Failed second use");
+            } else {
+                panic!("Test failed: second use");
             }
         }
     }
