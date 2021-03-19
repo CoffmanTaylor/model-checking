@@ -1,10 +1,12 @@
 use std::{
     collections::VecDeque,
     fmt::Debug,
+    iter,
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use chaining_iter::IterChain;
 use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, TimedOut};
 
 pub mod wrappers;
@@ -222,7 +224,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     ///
     /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
     /// of the search with vs. without optimizations.
-    pub fn search_dfs(
+    fn search_dfs(
         &self,
         end_condition: fn(&S) -> bool,
     ) -> (SearchResults<S, InvRes>, SearchStatistics)
@@ -244,93 +246,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         println!("Starting search...");
 
         // Setup the to_search queue with all of the possible transitions from the starting states.
-        let mut to_search = self.prepare_start_states();
-
-        // Variables used for printing statistics and determining if we have gone passed a search constraint.
-        let mut count = 0;
-        let mut last_count = 0;
-        let mut max_depth = 0;
-        let start_time = Instant::now();
-        let mut last_print = start_time.clone();
-
-        while let Some((depth, mut states)) = to_search.pop_front() {
-            max_depth = usize::max(depth, max_depth);
-
-            while let Some(state) = states.next() {
-                count += 1;
-
-                // Check if we should print active statistics.
-                if last_print.elapsed() > Duration::from_secs(5) {
-                    last_print = Instant::now();
-                    println!(
-                        "Max depth: {}, Searched {}k states, At a rate of {:.2}k states per second.",
-                        max_depth,
-                        count / 1000,
-                        (count - last_count) as f32 / 5000.0
-                    );
-                    last_count = count;
-                }
-
-                let stats = SearchStatistics {
-                    max_depth,
-                    number_of_states: count,
-                    total_time: start_time.elapsed(),
-                };
-
-                // Check if we have searched more states than the user requested.
-                if self.max_states.is_some() && Some(count) > self.max_states {
-                    println!("Search Complete");
-                    return (SearchedOverMax, stats);
-                }
-
-                // Check if we have searched for longer time than the user requested.
-                if let Some(timeout) = self.max_time {
-                    if start_time.elapsed() > timeout {
-                        println!("Search Complete");
-                        return (TimedOut, stats);
-                    }
-                }
-
-                // Check the state against the end condition, invariants, and prune conditions.
-                match self.check_state(&state, end_condition) {
-                    CheckResult::Found => return (Found(state), stats),
-                    CheckResult::BrokeInv(res) => return (BrokenInvariant(state, res), stats),
-                    CheckResult::DoNotSearchFurther => continue,
-                    CheckResult::Good => (),
-                }
-
-                // Check if we are at the maximin depth.
-                if self.max_depth == Some(depth) {
-                    continue;
-                }
-
-                // Add the possible transitions to the search queue.
-                if should_do_bfs {
-                    to_search.push_back((depth + 1, Arc::new(state).get_transitions()));
-                } else {
-                    to_search.push_front((depth + 1, Arc::new(state).get_transitions()));
-                }
-            }
-        }
-
-        // If we reach here, that means we have either emptied the to_search queue or have searched over
-        // the requested number of states the user requested.
-        println!("Search Complete");
-
-        (
-            SpaceExhausted,
-            SearchStatistics {
-                max_depth,
-                number_of_states: count,
-                total_time: start_time.elapsed(),
-            },
-        )
-    }
-
-    fn prepare_start_states(&self) -> VecDeque<(usize, S::Iter)>
-    where
-        S: Clone + SearchState,
-    {
+        let mut to_search = IterChain::new();
         let mut tmp = Vec::new();
 
         // Setup the first state
@@ -348,8 +264,86 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
         // Create the vec of transitions.
         tmp.into_iter()
-            .map(|s| (1, Arc::new(s).get_transitions()))
-            .collect()
+            .map(|s| iter::repeat(1).zip(Arc::new(s).get_transitions()))
+            .for_each(|i| to_search.include(i));
+
+        // Variables used for printing statistics and determining if we have gone passed a search constraint.
+        let mut count = 0;
+        let mut last_count = 0;
+        let mut max_depth = 0;
+        let start_time = Instant::now();
+        let mut last_print = start_time.clone();
+
+        while let Some((depth, state)) = to_search.next() {
+            max_depth = usize::max(depth, max_depth);
+            count += 1;
+
+            // Check if we should print active statistics.
+            if last_print.elapsed() > Duration::from_secs(5) {
+                last_print = Instant::now();
+                println!(
+                    "Max depth: {}, Searched {}k states, At a rate of {:.2}k states per second.",
+                    max_depth,
+                    count / 1000,
+                    (count - last_count) as f32 / 5000.0,
+                );
+                last_count = count;
+            }
+
+            let stats = SearchStatistics {
+                max_depth,
+                number_of_states: count,
+                total_time: start_time.elapsed(),
+            };
+
+            // Check if we have searched more states than the user requested.
+            if self.max_states.is_some() && Some(count) > self.max_states {
+                println!("Search Complete");
+                return (SearchedOverMax, stats);
+            }
+
+            // Check if we have searched for longer time than the user requested.
+            if let Some(timeout) = self.max_time {
+                if start_time.elapsed() > timeout {
+                    println!("Search Complete");
+                    return (TimedOut, stats);
+                }
+            }
+
+            // Check the state against the end condition, invariants, and prune conditions.
+            match self.check_state(&state, end_condition) {
+                CheckResult::Found => return (Found(state), stats),
+                CheckResult::BrokeInv(res) => return (BrokenInvariant(state, res), stats),
+                CheckResult::DoNotSearchFurther => continue,
+                CheckResult::Good => (),
+            }
+
+            // Check if we are at the maximin depth.
+            if self.max_depth == Some(depth) {
+                continue;
+            }
+
+            // Add the possible transitions to the search queue.
+            let transitions = iter::repeat(depth + 1).zip(Arc::new(state).get_transitions());
+            if should_do_bfs {
+                to_search.include(transitions);
+            } else {
+                to_search.include_front(transitions);
+            }
+        }
+
+        // If we reach here, that means we have either emptied the to_search queue or have searched over
+        // the requested number of states the user requested.
+        println!("Search Complete");
+
+        (
+            SpaceExhausted,
+            SearchStatistics {
+                max_depth,
+                number_of_states: count,
+                total_time: start_time.elapsed(),
+            },
+        )
     }
 
     fn check_state(&self, state: &S, end_condition: fn(&S) -> bool) -> CheckResult<InvRes> {
