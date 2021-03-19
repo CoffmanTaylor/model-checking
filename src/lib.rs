@@ -58,6 +58,13 @@ pub enum SearchResults<State, InvRes> {
     TimedOut,
 }
 
+enum CheckResult<InvRes> {
+    Good,
+    DoNotSearchFurther,
+    BrokeInv(InvRes),
+    Found,
+}
+
 /// Defines the System that you want to search. The System must contain at least one start state.
 #[derive(Clone)]
 pub struct SearchConfig<S, InvRes> {
@@ -174,6 +181,8 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         self
     }
 
+    /// Will preform a bfs search with no end condition. Will only return if an invariant is broken
+    /// or a constraint is reached, ie max depth or time limit.
     pub fn exhaustive_search(&self) -> (SearchResults<S, InvRes>, SearchStatistics)
     where
         S: SearchState + Clone,
@@ -199,30 +208,43 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     where
         S: SearchState + Clone,
     {
+        self.search_dfs_bfs(end_condition, true)
+    }
+
+    /// Preforms a Depth First Search on the System looking for a State that matches the given
+    /// end condition. If a matching State is found, it is returned in `Found(State)`. If any of the
+    /// System's invariants are violated, then the State that failed and result of the invariant
+    /// are returned as `BrokenInvariant(State, ResInv)`. Will clear any shared data contained in the
+    /// states. It is recommended that you set a max depth if your search space is infinite.
+    ///
+    /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
+    /// brake invariants.
+    ///
+    /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
+    /// of the search with vs. without optimizations.
+    pub fn search_dfs(
+        &self,
+        end_condition: fn(&S) -> bool,
+    ) -> (SearchResults<S, InvRes>, SearchStatistics)
+    where
+        S: SearchState + Clone,
+    {
+        self.search_dfs_bfs(end_condition, false)
+    }
+
+    /// Will preform either a BFS or a DFS search depending on should_do_bfs.
+    fn search_dfs_bfs(
+        &self,
+        end_condition: fn(&S) -> bool,
+        should_do_bfs: bool,
+    ) -> (SearchResults<S, InvRes>, SearchStatistics)
+    where
+        S: SearchState + Clone,
+    {
         println!("Starting search...");
 
         // Setup the to_search queue with all of the possible transitions from the starting states.
-        let mut to_search: VecDeque<_> = {
-            let mut tmp = Vec::new();
-
-            // Setup the first state
-            let mut start_state = self.start_states[0].clone();
-            start_state.clear_shared_state();
-            tmp.push(start_state);
-
-            // merge the shared states of all of the other start states.
-            for (i, state) in self.start_states.iter().enumerate().skip(1) {
-                let mut state = state.clone();
-                state.clear_shared_state();
-                tmp[i - 1].merge_shared_state(&mut state);
-                tmp.push(state);
-            }
-
-            // Create the vec of transitions.
-            tmp.into_iter()
-                .map(|s| (1, Arc::new(s).get_transitions()))
-                .collect()
-        };
+        let mut to_search = self.prepare_start_states();
 
         // Variables used for printing statistics and determining if we have gone passed a search constraint.
         let mut count = 0;
@@ -241,76 +263,40 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 if last_print.elapsed() > Duration::from_secs(5) {
                     last_print = Instant::now();
                     println!(
-                        "Current depth: {}, Searched {}k states, At a rate of {:.2}k states per second.",
-                        depth,
+                        "Max depth: {}, Searched {}k states, At a rate of {:.2}k states per second.",
+                        max_depth,
                         count / 1000,
                         (count - last_count) as f32 / 5000.0
                     );
                     last_count = count;
                 }
 
+                let stats = SearchStatistics {
+                    max_depth,
+                    number_of_states: count,
+                    total_time: start_time.elapsed(),
+                };
+
                 // Check if we have searched more states than the user requested.
                 if self.max_states.is_some() && Some(count) > self.max_states {
                     println!("Search Complete");
-                    return (
-                        SearchedOverMax,
-                        SearchStatistics {
-                            max_depth,
-                            number_of_states: count,
-                            total_time: start_time.elapsed(),
-                        },
-                    );
+                    return (SearchedOverMax, stats);
                 }
 
                 // Check if we have searched for longer time than the user requested.
                 if let Some(timeout) = self.max_time {
                     if start_time.elapsed() > timeout {
                         println!("Search Complete");
-                        return (
-                            TimedOut,
-                            SearchStatistics {
-                                max_depth,
-                                number_of_states: count,
-                                total_time: start_time.elapsed(),
-                            },
-                        );
+                        return (TimedOut, stats);
                     }
                 }
 
-                // Check the invariants.
-                for inv in self.invariants.iter() {
-                    match inv(&state) {
-                        Ok(_) => continue,
-                        Err(res) => {
-                            println!("Search Complete");
-                            return (
-                                BrokenInvariant(state, res),
-                                SearchStatistics {
-                                    max_depth,
-                                    number_of_states: count,
-                                    total_time: start_time.elapsed(),
-                                },
-                            );
-                        }
-                    }
-                }
-
-                // Check the end condition.
-                if end_condition(&state) {
-                    println!("Search Complete");
-                    return (
-                        Found(state),
-                        SearchStatistics {
-                            max_depth,
-                            number_of_states: count,
-                            total_time: start_time.elapsed(),
-                        },
-                    );
-                }
-
-                // Check if the state should be pruned
-                if self.prune_conditions.iter().any(|f| f(&state)) {
-                    continue;
+                // Check the state against the end condition, invariants, and prune conditions.
+                match self.check_state(&state, end_condition) {
+                    CheckResult::Found => return (Found(state), stats),
+                    CheckResult::BrokeInv(res) => return (BrokenInvariant(state, res), stats),
+                    CheckResult::DoNotSearchFurther => continue,
+                    CheckResult::Good => (),
                 }
 
                 // Check if we are at the maximin depth.
@@ -319,7 +305,11 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 }
 
                 // Add the possible transitions to the search queue.
-                to_search.push_back((depth + 1, Arc::new(state).get_transitions()));
+                if should_do_bfs {
+                    to_search.push_back((depth + 1, Arc::new(state).get_transitions()));
+                } else {
+                    to_search.push_front((depth + 1, Arc::new(state).get_transitions()));
+                }
             }
         }
 
@@ -335,6 +325,57 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 total_time: start_time.elapsed(),
             },
         )
+    }
+
+    fn prepare_start_states(&self) -> VecDeque<(usize, S::Iter)>
+    where
+        S: Clone + SearchState,
+    {
+        let mut tmp = Vec::new();
+
+        // Setup the first state
+        let mut start_state = self.start_states[0].clone();
+        start_state.clear_shared_state();
+        tmp.push(start_state);
+
+        // merge the shared states of all of the other start states.
+        for (i, state) in self.start_states.iter().enumerate().skip(1) {
+            let mut state = state.clone();
+            state.clear_shared_state();
+            tmp[i - 1].merge_shared_state(&mut state);
+            tmp.push(state);
+        }
+
+        // Create the vec of transitions.
+        tmp.into_iter()
+            .map(|s| (1, Arc::new(s).get_transitions()))
+            .collect()
+    }
+
+    fn check_state(&self, state: &S, end_condition: fn(&S) -> bool) -> CheckResult<InvRes> {
+        // Check the invariants.
+        for inv in self.invariants.iter() {
+            match inv(&state) {
+                Ok(_) => continue,
+                Err(res) => {
+                    println!("Search Complete");
+                    return CheckResult::BrokeInv(res);
+                }
+            }
+        }
+
+        // Check the end condition.
+        if end_condition(&state) {
+            println!("Search Complete");
+            return CheckResult::Found;
+        }
+
+        // Check if the state should be pruned
+        if self.prune_conditions.iter().any(|f| f(&state)) {
+            return CheckResult::DoNotSearchFurther;
+        }
+
+        CheckResult::Good
     }
 }
 
@@ -392,7 +433,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod check_inv_before_pruning {
@@ -417,7 +458,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod chain_to_brake {
@@ -443,7 +484,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod tree_to_end {
@@ -527,7 +568,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod pruning {
@@ -587,7 +628,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod max_depth_exhausted {
@@ -613,7 +654,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod max_depth_found {
@@ -636,7 +677,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod can_reuse_searcher {
@@ -660,7 +701,7 @@ mod tests {
             };
         }
 
-        define_tests!(search_bfs);
+        define_tests!(search_bfs, search_dfs);
     }
 
     mod shared_state {
