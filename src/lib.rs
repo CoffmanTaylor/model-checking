@@ -166,10 +166,26 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         self
     }
 
+    /// Removes all of the start states and replaces them with the given new start state.
+    pub fn replace_start(mut self, new_start: S) -> Self {
+        self.start_states = VecDeque::new();
+        self.start_states.push_back(new_start);
+
+        self
+    }
+
+    pub fn exhaustive_search(&self) -> (SearchResults<S, InvRes>, SearchStatistics)
+    where
+        S: SearchState + Clone,
+    {
+        self.search_bfs(|_| false)
+    }
+
     /// Preforms a Breath First Search on the System looking for a State that matches the given
     /// end condition. If a matching State is found, it is returned in `Found(State)`. If any of the
     /// System's invariants are violated, then the State that failed and result of the invariant
-    /// are returned as `BrokenInvariant(State, ResInv)`.
+    /// are returned as `BrokenInvariant(State, ResInv)`. Will clear any shared data contained in the
+    /// states.
     ///
     /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
     /// brake invariants.
