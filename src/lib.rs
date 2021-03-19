@@ -71,8 +71,8 @@ enum CheckResult<InvRes> {
 #[derive(Clone)]
 pub struct SearchConfig<S, InvRes> {
     start_states: VecDeque<S>,
-    invariants: Vec<fn(&S) -> Result<(), InvRes>>,
-    prune_conditions: Vec<fn(&S) -> bool>,
+    invariants: Vec<Arc<Box<dyn Fn(&S) -> Result<(), InvRes>>>>,
+    prune_conditions: Vec<Arc<Box<dyn Fn(&S) -> bool>>>,
     max_depth: Option<usize>,
     max_states: Option<usize>,
     max_time: Option<Duration>,
@@ -82,6 +82,17 @@ impl<S> SearchConfig<S, ()> {
     /// Constructs a new `SearchConfig` with no return type of invariants.
     pub fn new_without_inv(start_state: S) -> SearchConfig<S, ()> {
         SearchConfig::new(start_state)
+    }
+}
+
+impl<S> SearchConfig<S, String> {
+    /// Adds a simple boolean invariant with the given name. If the invariant ever returns false,
+    /// the name will be returned in the [SearchResults::BrokenInvariant].
+    pub fn add_named_invariant<F>(self, name: String, inv: F) -> Self
+    where
+        F: Fn(&S) -> bool + 'static,
+    {
+        self.add_invariant(move |s| if inv(s) { Ok(()) } else { Err(name.clone()) })
     }
 }
 
@@ -119,18 +130,24 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
     /// Adds an invariant to the System. Every state discovered during the search, excluding
     /// the start States, will be checked against every invariant of the System.
-    pub fn add_invariant(mut self, inv: fn(&S) -> Result<(), InvRes>) -> Self {
-        self.invariants.push(inv);
+    pub fn add_invariant<F>(mut self, inv: F) -> Self
+    where
+        F: Fn(&S) -> Result<(), InvRes> + 'static,
+    {
+        self.invariants.push(Arc::new(Box::new(inv)));
         self
     }
 
     /// Adds a collection of invariants to the System. Every state discovered during the search,
     /// excluding the start States, will be checked against every invariant of the System.
-    pub fn add_invariants<I>(mut self, invs: I) -> Self
+    pub fn add_invariants<I, F>(mut self, invs: I) -> Self
     where
-        I: IntoIterator<Item = fn(&S) -> Result<(), InvRes>>,
+        F: Fn(&S) -> Result<(), InvRes> + 'static,
+        I: IntoIterator<Item = F>,
     {
-        self.invariants.extend(invs);
+        for inv in invs {
+            self.invariants.push(Arc::new(Box::new(inv)));
+        }
         self
     }
 
@@ -142,8 +159,12 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Note: The start States are not checked against the prune conditions.
     ///
     /// Note: Invariants and the end condition are checked before the state is considered for pruning.
-    pub fn add_prune_condition(mut self, prune_condition: fn(&S) -> bool) -> Self {
-        self.prune_conditions.push(prune_condition);
+    pub fn add_prune_condition<F>(mut self, prune_condition: F) -> Self
+    where
+        F: Fn(&S) -> bool + 'static,
+    {
+        self.prune_conditions
+            .push(Arc::new(Box::new(prune_condition)));
         self
     }
 
@@ -224,6 +245,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     ///
     /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
     /// of the search with vs. without optimizations.
+    #[allow(unused)]
     fn search_dfs(
         &self,
         end_condition: fn(&S) -> bool,
