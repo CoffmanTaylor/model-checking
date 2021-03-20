@@ -60,6 +60,15 @@ pub enum SearchResults<State, InvRes> {
     TimedOut,
 }
 
+impl<State, InvRes> SearchResults<State, InvRes> {
+    pub fn is_found(&self) -> bool {
+        match self {
+            Found(_) => true,
+            _ => false,
+        }
+    }
+}
+
 enum CheckResult<InvRes> {
     Good,
     DoNotSearchFurther,
@@ -224,12 +233,10 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     ///
     /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
     /// of the search with vs. without optimizations.
-    pub fn search_bfs(
-        &self,
-        end_condition: fn(&S) -> bool,
-    ) -> (SearchResults<S, InvRes>, SearchStatistics)
+    pub fn search_bfs<F>(&self, end_condition: F) -> (SearchResults<S, InvRes>, SearchStatistics)
     where
         S: SearchState + Clone,
+        F: Fn(&S) -> bool,
     {
         self.search_dfs_bfs(end_condition, true)
     }
@@ -246,25 +253,26 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
     /// of the search with vs. without optimizations.
     #[allow(unused)]
-    fn search_dfs(
-        &self,
-        end_condition: fn(&S) -> bool,
-    ) -> (SearchResults<S, InvRes>, SearchStatistics)
+    fn search_dfs<F>(&self, end_condition: F) -> (SearchResults<S, InvRes>, SearchStatistics)
     where
         S: SearchState + Clone,
+        F: Fn(&S) -> bool,
     {
         self.search_dfs_bfs(end_condition, false)
     }
 
     /// Will preform either a BFS or a DFS search depending on should_do_bfs.
-    fn search_dfs_bfs(
+    fn search_dfs_bfs<F>(
         &self,
-        end_condition: fn(&S) -> bool,
+        end_condition: F,
         should_do_bfs: bool,
     ) -> (SearchResults<S, InvRes>, SearchStatistics)
     where
         S: SearchState + Clone,
+        F: Fn(&S) -> bool,
     {
+        let end_condition = Arc::new(Box::new(end_condition));
+
         println!("Starting search...");
 
         // Setup the to_search queue with all of the possible transitions from the starting states.
@@ -333,7 +341,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
             }
 
             // Check the state against the end condition, invariants, and prune conditions.
-            match self.check_state(&state, end_condition) {
+            match self.check_state(&state, Arc::clone(&end_condition)) {
                 CheckResult::Found => return (Found(state), stats),
                 CheckResult::BrokeInv(res) => return (BrokenInvariant(state, res), stats),
                 CheckResult::DoNotSearchFurther => continue,
@@ -368,7 +376,10 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         )
     }
 
-    fn check_state(&self, state: &S, end_condition: fn(&S) -> bool) -> CheckResult<InvRes> {
+    fn check_state<F>(&self, state: &S, end_condition: Arc<Box<F>>) -> CheckResult<InvRes>
+    where
+        F: Fn(&S) -> bool,
+    {
         // Check the invariants.
         for inv in self.invariants.iter() {
             match inv(&state) {

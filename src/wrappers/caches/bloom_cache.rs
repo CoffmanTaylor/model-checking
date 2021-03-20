@@ -2,7 +2,7 @@ use std::{
     fmt::Debug,
     hash::Hash,
     iter::FilterMap,
-    ops::Deref,
+    ops::{Deref, DerefMut},
     sync::{Arc, Mutex},
 };
 
@@ -44,6 +44,15 @@ impl<State> Deref for BloomCache<State> {
 
     fn deref(&self) -> &Self::Target {
         &*self.state
+    }
+}
+
+impl<State> DerefMut for BloomCache<State>
+where
+    State: Clone,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.state)
     }
 }
 
