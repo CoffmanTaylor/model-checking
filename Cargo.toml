@@ -10,3 +10,4 @@ rand = "0.8.3"
 bloom-filter = {path = "../bloom-filter"}
 chaining-iter = {path = "../chaining-iter"}
 hi-bag = {path = "../hi-bag"}
+derivative = "2.2.0"
