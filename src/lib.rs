@@ -9,6 +9,7 @@ use std::{
 use chaining_iter::IterChain;
 use SearchResults::{BrokenInvariant, Found, SearchedOverMax, SpaceExhausted, TimedOut};
 
+pub mod multi_phase_searcher;
 pub mod wrappers;
 
 /// This trait means that the struct this is implemented on can be used to define a specific state
@@ -69,13 +70,6 @@ impl<State, InvRes> SearchResults<State, InvRes> {
     }
 }
 
-enum CheckResult<InvRes> {
-    Good,
-    DoNotSearchFurther,
-    BrokeInv(InvRes),
-    Found,
-}
-
 /// Defines the System that you want to search. The System must contain at least one start state.
 #[derive(Clone)]
 pub struct SearchConfig<S, InvRes> {
@@ -97,7 +91,7 @@ impl<S> SearchConfig<S, ()> {
 impl<S> SearchConfig<S, String> {
     /// Adds a simple boolean invariant with the given name. If the invariant ever returns false,
     /// the name will be returned in the [SearchResults::BrokenInvariant].
-    pub fn add_named_invariant<F>(self, name: String, inv: F) -> Self
+    pub fn add_named_invariant<F>(&mut self, name: String, inv: F) -> &mut Self
     where
         F: Fn(&S) -> bool + 'static,
     {
@@ -122,14 +116,14 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
     /// Add the given State as a possible start state. When searching, all possible start
     /// States are considered.
-    pub fn add_start_state(mut self, start_state: S) -> Self {
+    pub fn add_start_state(&mut self, start_state: S) -> &mut Self {
         self.start_states.push_back(start_state);
         self
     }
 
     /// Add all of the given States as possible start states. When searching, all possible
     /// start States are considered.
-    pub fn add_start_states<I>(mut self, start_states: I) -> Self
+    pub fn add_start_states<I>(&mut self, start_states: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
     {
@@ -139,7 +133,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
     /// Adds an invariant to the System. Every state discovered during the search, excluding
     /// the start States, will be checked against every invariant of the System.
-    pub fn add_invariant<F>(mut self, inv: F) -> Self
+    pub fn add_invariant<F>(&mut self, inv: F) -> &mut Self
     where
         F: Fn(&S) -> Result<(), InvRes> + 'static,
     {
@@ -149,7 +143,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
     /// Adds a collection of invariants to the System. Every state discovered during the search,
     /// excluding the start States, will be checked against every invariant of the System.
-    pub fn add_invariants<I, F>(mut self, invs: I) -> Self
+    pub fn add_invariants<I, F>(&mut self, invs: I) -> &mut Self
     where
         F: Fn(&S) -> Result<(), InvRes> + 'static,
         I: IntoIterator<Item = F>,
@@ -168,7 +162,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Note: The start States are not checked against the prune conditions.
     ///
     /// Note: Invariants and the end condition are checked before the state is considered for pruning.
-    pub fn add_prune_condition<F>(mut self, prune_condition: F) -> Self
+    pub fn add_prune_condition<F>(&mut self, prune_condition: F) -> &mut Self
     where
         F: Fn(&S) -> bool + 'static,
     {
@@ -182,7 +176,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// returned.
     ///
     /// Default to no maximum depth.
-    pub fn set_max_depth(mut self, max_depth: usize) -> Self {
+    pub fn set_max_depth(&mut self, max_depth: usize) -> &mut Self {
         self.max_depth = Some(max_depth);
         self
     }
@@ -191,7 +185,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// reaching the maximum, a `SearchResult::SearchedOfMax` will be returned.
     ///
     /// Default to no maximum.
-    pub fn set_max_number_of_states(mut self, max_states: usize) -> Self {
+    pub fn set_max_number_of_states(&mut self, max_states: usize) -> &mut Self {
         self.max_states = Some(max_states);
         self
     }
@@ -200,13 +194,13 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// the given duration, a `SearchResult::TimedOut` will be returned.
     ///
     /// Default to no maximum.
-    pub fn set_timeout(mut self, timeout: Duration) -> Self {
+    pub fn set_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.max_time = Some(timeout);
         self
     }
 
     /// Removes all of the start states and replaces them with the given new start state.
-    pub fn replace_start(mut self, new_start: S) -> Self {
+    pub fn replace_start(&mut self, new_start: S) -> &mut Self {
         self.start_states = VecDeque::new();
         self.start_states.push_back(new_start);
 
@@ -234,39 +228,6 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
     /// of the search with vs. without optimizations.
     pub fn search_bfs<F>(&self, end_condition: F) -> (SearchResults<S, InvRes>, SearchStatistics)
-    where
-        S: SearchState + Clone,
-        F: Fn(&S) -> bool,
-    {
-        self.search_dfs_bfs(end_condition, true)
-    }
-
-    /// Preforms a Depth First Search on the System looking for a State that matches the given
-    /// end condition. If a matching State is found, it is returned in `Found(State)`. If any of the
-    /// System's invariants are violated, then the State that failed and result of the invariant
-    /// are returned as `BrokenInvariant(State, ResInv)`. Will clear any shared data contained in the
-    /// states. It is recommended that you set a max depth if your search space is infinite.
-    ///
-    /// Note: Assumes that the starting states are: not prunable, not an end state, and do not
-    /// brake invariants.
-    ///
-    /// Note: It is *extremely* encouraged to compile with optimizations. I have witnessed 10x speed up
-    /// of the search with vs. without optimizations.
-    #[allow(unused)]
-    fn search_dfs<F>(&self, end_condition: F) -> (SearchResults<S, InvRes>, SearchStatistics)
-    where
-        S: SearchState + Clone,
-        F: Fn(&S) -> bool,
-    {
-        self.search_dfs_bfs(end_condition, false)
-    }
-
-    /// Will preform either a BFS or a DFS search depending on should_do_bfs.
-    fn search_dfs_bfs<F>(
-        &self,
-        end_condition: F,
-        should_do_bfs: bool,
-    ) -> (SearchResults<S, InvRes>, SearchStatistics)
     where
         S: SearchState + Clone,
         F: Fn(&S) -> bool,
@@ -340,12 +301,26 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 }
             }
 
-            // Check the state against the end condition, invariants, and prune conditions.
-            match self.check_state(&state, Arc::clone(&end_condition)) {
-                CheckResult::Found => return (Found(state), stats),
-                CheckResult::BrokeInv(res) => return (BrokenInvariant(state, res), stats),
-                CheckResult::DoNotSearchFurther => continue,
-                CheckResult::Good => (),
+            // Check the invariants.
+            for inv in self.invariants.iter() {
+                match inv(&state) {
+                    Ok(_) => continue,
+                    Err(res) => {
+                        println!("Search Complete");
+                        return (BrokenInvariant(state, res), stats);
+                    }
+                }
+            }
+
+            // Check the end condition.
+            if end_condition(&state) {
+                println!("Search Complete");
+                return (Found(state), stats);
+            }
+
+            // Check if the state should be pruned
+            if self.prune_conditions.iter().any(|f| f(&state)) {
+                continue;
             }
 
             // Check if we are at the maximin depth.
@@ -355,11 +330,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
             // Add the possible transitions to the search queue.
             let transitions = iter::repeat(depth + 1).zip(Arc::new(state).get_transitions());
-            if should_do_bfs {
-                to_search.include(transitions);
-            } else {
-                to_search.include_front(transitions);
-            }
+            to_search.include(transitions);
         }
 
         // If we reach here, that means we have either emptied the to_search queue or have searched over
@@ -374,454 +345,5 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
                 total_time: start_time.elapsed(),
             },
         )
-    }
-
-    fn check_state<F>(&self, state: &S, end_condition: Arc<Box<F>>) -> CheckResult<InvRes>
-    where
-        F: Fn(&S) -> bool,
-    {
-        // Check the invariants.
-        for inv in self.invariants.iter() {
-            match inv(&state) {
-                Ok(_) => continue,
-                Err(res) => {
-                    println!("Search Complete");
-                    return CheckResult::BrokeInv(res);
-                }
-            }
-        }
-
-        // Check the end condition.
-        if end_condition(&state) {
-            println!("Search Complete");
-            return CheckResult::Found;
-        }
-
-        // Check if the state should be pruned
-        if self.prune_conditions.iter().any(|f| f(&state)) {
-            return CheckResult::DoNotSearchFurther;
-        }
-
-        CheckResult::Good
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::iter;
-
-    mod chain {
-        use super::*;
-
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        pub struct State(pub usize);
-
-        impl SearchState for State {
-            type Iter = iter::Once<State>;
-            fn get_transitions(self: Arc<Self>) -> Self::Iter {
-                iter::once(State(self.0 + 1))
-            }
-        }
-    }
-
-    mod tree {
-        use super::*;
-
-        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-        pub struct State(pub usize, pub usize);
-
-        impl SearchState for State {
-            type Iter = iter::Chain<iter::Once<State>, iter::Once<State>>;
-            fn get_transitions(self: Arc<Self>) -> Self::Iter {
-                iter::once(State(self.0 + 1, self.1)).chain(iter::once(State(self.0, self.1 + 1)))
-            }
-        }
-    }
-
-    mod chain_to_end {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use chain::State;
-
-                        let tester =
-                            SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
-
-                        let (res, _) = tester.$func(|s| s == &State(100));
-
-                        assert_eq!(Found(State(100)), res);
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod check_inv_before_pruning {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use chain::State;
-
-                        let tester =
-                            SearchConfig::new(State(0))
-                                .set_timeout(Duration::from_secs(5))
-                                .add_invariant(|s| if s == &State(10) { Err(()) } else { Ok(()) })
-                                .add_prune_condition(|s| s == &State(10));
-
-                        assert_eq!(BrokenInvariant(State(10), ()), tester.$func(|s| s == &State(100)).0);
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod chain_to_brake {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use chain::State;
-
-                        let tester = SearchConfig::new(State(0))
-                            .set_timeout(Duration::from_secs(5))
-                            .add_invariant(|s| if s.0 != 10 { Ok(()) } else { Err("test") });
-
-                        assert_eq!(
-                            BrokenInvariant(State(10), "test"),
-                            tester.$func(|_| false).0
-                        );
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod tree_to_end {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use tree::State;
-
-                        let tester = SearchConfig::new_without_inv(State(0, 0)).set_timeout(Duration::from_secs(5));
-
-                        assert_eq!(
-                            Found(State(10, 5)),
-                            tester.$func(|s| s == &State(10, 5)).0
-                        );
-                    }
-                )+
-
-            };
-        }
-
-        define_tests!(search_bfs);
-    }
-
-    mod tree_to_break {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use tree::State;
-
-                        let tester = SearchConfig::new(State(0, 0))
-                            .set_timeout(Duration::from_secs(5))
-                            .add_invariant(|s| {
-                                if s != &State(10, 5) {
-                                    Ok(())
-                                } else {
-                                    Err("test")
-                                }
-                            });
-
-                        assert_eq!(
-                            BrokenInvariant(State(10, 5), "test"),
-                            tester.$func(|_| false).0
-                        );
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs);
-    }
-
-    mod multiple_invariants {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use chain::State;
-
-                        let tester = SearchConfig::new(State(0))
-                            .set_timeout(Duration::from_secs(5))
-                            .add_invariant(|_| if true { Ok(()) } else { Err("test 1") })
-                            .add_invariant(|s| if s.0 < 1 { Ok(()) } else { Err("test 2") });
-
-                        assert_eq!(
-                            BrokenInvariant(State(1), "test 2"),
-                            tester.$func(|_| false).0
-                        );
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod pruning {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use tree::State;
-
-                        let tester = SearchConfig::new(State(0, 0))
-                            .set_timeout(Duration::from_secs(5))
-                            .add_invariant(|s| if s.1 != 4 { Ok(()) } else { Err("test") })
-                            .add_prune_condition(|s| s.1 >= 3);
-
-                        assert_eq!(
-                            Found(State(10, 0)),
-                            tester.$func(|s| s == &State(10, 0)).0
-                        );
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs);
-    }
-
-    mod bounded_space {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-                        struct State(usize);
-
-                        impl SearchState for State {
-                            type Iter = Box<dyn Iterator<Item = State>>;
-                            fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
-                                if self.0 < 10 {
-                                    Box::new(iter::once(State(self.0 + 1)))
-                                } else {
-                                    Box::new(iter::empty())
-                                }
-                            }
-                        }
-
-                        let tester = SearchConfig::new_without_inv(State(0)).set_timeout(Duration::from_secs(5));
-
-                        assert_eq!(SpaceExhausted, tester.$func(|s| s.0 > 20).0);
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod max_depth_exhausted {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use chain::State;
-
-                        let tester = SearchConfig::new_without_inv(State(0))
-                            .set_timeout(Duration::from_secs(5))
-                            .set_max_depth(10);
-
-                        let (res, stats) = tester.$func(|_| false);
-
-                        assert_eq!(SpaceExhausted, res);
-                        assert_eq!(10, stats.number_of_states);
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod max_depth_found {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use chain::State;
-
-                        let tester = SearchConfig::new_without_inv(State(0))
-                            .set_timeout(Duration::from_secs(5))
-                            .set_max_depth(10);
-
-                        assert_eq!(Found(State(10)), tester.$func(|s| s == &State(10)).0);
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod can_reuse_searcher {
-        use super::*;
-
-        macro_rules! define_tests {
-            ($( $func:ident ),+) => {
-                $(
-                    #[test]
-                    fn $func() {
-                        use chain::State;
-
-                        let tester = SearchConfig::new_without_inv(State(0))
-                            .set_timeout(Duration::from_secs(5))
-                            .set_max_depth(10);
-
-                        assert_eq!(Found(State(10)), tester.clone().$func(|s| s == &State(10)).0);
-                        assert_eq!(Found(State(10)), tester.clone().$func(|s| s == &State(10)).0);
-                    }
-                )+
-            };
-        }
-
-        define_tests!(search_bfs, search_dfs);
-    }
-
-    mod shared_state {
-        use std::{iter::Once, ops::AddAssign, sync::Mutex};
-
-        use super::*;
-
-        #[derive(Clone)]
-        struct State {
-            shared: Arc<Mutex<usize>>,
-            private: usize,
-        }
-
-        impl State {
-            fn new() -> State {
-                State {
-                    shared: Arc::new(Mutex::new(1)),
-                    private: 1,
-                }
-            }
-        }
-
-        impl SearchState for State {
-            type Iter = Once<State>;
-
-            fn get_transitions(self: Arc<Self>) -> Self::Iter {
-                self.shared.lock().unwrap().add_assign(1);
-                iter::once(State {
-                    shared: Arc::clone(&self.shared),
-                    private: self.private + 1,
-                })
-            }
-
-            fn clear_shared_state(&mut self) {
-                self.shared = Arc::new(Mutex::new(1));
-            }
-
-            fn merge_shared_state(&mut self, other: &mut Self) {
-                // Add the count from other into self.
-                self.shared
-                    .lock()
-                    .unwrap()
-                    .add_assign(other.shared.lock().unwrap().clone());
-
-                // link self's count to other.
-                other.shared = Arc::clone(&self.shared);
-            }
-        }
-
-        #[test]
-        fn single_shared_state() {
-            let (res, _) =
-                SearchConfig::new_without_inv(State::new()).search_bfs(|s| s.private == 10);
-
-            if let Found(state) = res {
-                assert_eq!(10, state.shared.lock().unwrap().clone());
-            } else {
-                panic!("Test failed");
-            }
-        }
-
-        #[test]
-        fn dual_shared_state() {
-            let (res, _) = SearchConfig::new_without_inv(State::new())
-                .add_start_state(State::new())
-                .search_bfs(|s| s.private == 10);
-
-            if let Found(state) = res {
-                assert_eq!(20, state.shared.lock().unwrap().clone());
-            } else {
-                panic!("Test failed");
-            }
-        }
-
-        #[test]
-        fn can_reuse_search_with_shared_state() {
-            let searcher = SearchConfig::new_without_inv(State::new());
-
-            let (res, _) = searcher.search_bfs(|s| s.private == 10);
-
-            if let Found(state) = res {
-                assert_eq!(10, state.shared.lock().unwrap().clone(), "Failed first use");
-            } else {
-                panic!("Test failed: first use");
-            }
-
-            let (res, _) = searcher.search_bfs(|s| s.private == 5);
-
-            if let Found(state) = res {
-                assert_eq!(5, state.shared.lock().unwrap().clone(), "Failed second use");
-            } else {
-                panic!("Test failed: second use");
-            }
-        }
     }
 }
