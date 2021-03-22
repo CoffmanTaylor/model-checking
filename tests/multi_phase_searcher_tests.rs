@@ -56,6 +56,24 @@ fn dual_phase_with_propagating_error() {
 }
 
 #[test]
+fn dual_phase_with_propagating_error_with_map() {
+    use chain::State;
+
+    let mut searcher = SearchConfig::new(State(0));
+    searcher.set_timeout(Duration::from_secs(5));
+
+    let res = begin_multi_phase_search(searcher)
+        .add_named_phase_invariant("not 5".to_string(), |s| s.0 != 5)
+        .search(|s| s.0 == 10)
+        .add_phase()
+        .map_state(|_| State(10))
+        .search(|s| s.0 == 20);
+
+    assert_eq!(0, res.phase);
+    assert_eq!(BrokenInvariant(State(5), "not 5".to_string()), res.results);
+}
+
+#[test]
 fn dual_phase_with_phase_invariant_that_will_fail_in_other_phase() {
     use chain::State;
 

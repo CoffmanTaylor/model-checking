@@ -1,10 +1,10 @@
+use std::fmt::Debug;
+
 use crate::{
     SearchConfig,
     SearchResults::{self, Found},
     SearchState, SearchStatistics,
 };
-
-use derivative::Derivative;
 
 pub struct PhaseConfig<State, InvRes> {
     phase_number: usize,
@@ -23,14 +23,24 @@ enum PhaseConfigOrError<State, InvRes> {
     },
 }
 
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct PhaseSearchResults<State, InvRes> {
     pub phase: usize,
     pub results: SearchResults<State, InvRes>,
     pub stats: SearchStatistics,
-    #[derivative(Debug = "ignore")]
     base_searcher: Option<SearchConfig<State, InvRes>>,
+}
+
+impl<State, InvRes> Debug for PhaseSearchResults<State, InvRes>
+where
+    SearchResults<State, InvRes>: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhaseSearchResults")
+            .field("phase_number", &self.phase)
+            .field("results", &self.results)
+            .field("stats", &self.stats)
+            .finish()
+    }
 }
 
 pub fn begin_multi_phase_search<State, InvRes>(
@@ -62,9 +72,9 @@ impl<State, InvRes> PhaseConfig<State, InvRes> {
                 name,
             } => {
                 if let Some(name) = name {
-                    println!("Beginning phase {} : {}", self.phase_number + 1, name);
+                    println!("Beginning phase {} : {}", self.phase_number, name);
                 } else {
-                    println!("Beginning phase {}", self.phase_number + 1);
+                    println!("Beginning phase {}", self.phase_number);
                 }
                 let (results, stats) = phase_searcher.search_bfs(end_condition);
                 PhaseSearchResults {
