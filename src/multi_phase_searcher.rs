@@ -43,6 +43,23 @@ where
     }
 }
 
+pub fn begin_multi_phase_search_with_name<State, InvRes>(
+    base_searcher: SearchConfig<State, InvRes>,
+    first_phase_name: &'static str,
+) -> PhaseConfig<State, InvRes>
+where
+    SearchConfig<State, InvRes>: Clone,
+{
+    PhaseConfig {
+        phase_number: 0,
+        config_or_error: PhaseConfigOrError::Config {
+            base_searcher: base_searcher.clone(),
+            phase_searcher: base_searcher,
+            name: Some(first_phase_name),
+        },
+    }
+}
+
 pub fn begin_multi_phase_search<State, InvRes>(
     base_searcher: SearchConfig<State, InvRes>,
 ) -> PhaseConfig<State, InvRes>
@@ -54,7 +71,7 @@ where
         config_or_error: PhaseConfigOrError::Config {
             base_searcher: base_searcher.clone(),
             phase_searcher: base_searcher,
-            name: Some("Start phase"),
+            name: Some("Start Phase"),
         },
     }
 }
