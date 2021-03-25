@@ -4,9 +4,10 @@ version = "0.1.1"
 authors = ["Taylor Coffman <CoffmanTaylor96+git@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/CoffmanTaylor/model-checking.git"
 
 [dependencies]
 rand = "0.8.3"
-bloom-filter = {path = "../bloom-filter"}
-chaining-iter = {path = "../chaining-iter"}
-hi-bag = {path = "../hi-bag"}
+bloom-filter = {git = "https://github.com/CoffmanTaylor/BloomFilter.git", branch = "main"}
+chaining-iter = {git = "https://github.com/CoffmanTaylor/ChainingIterator.git", branch = "main"}
+hi-bag = {git = "https://github.com/CoffmanTaylor/HIBag.git", branch = "main"}
