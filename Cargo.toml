@@ -11,3 +11,5 @@ rand = "0.8.3"
 bloom-filter = {git = "https://github.com/CoffmanTaylor/BloomFilter.git", branch = "main"}
 chaining-iter = {git = "https://github.com/CoffmanTaylor/ChainingIterator.git", branch = "main"}
 hi-bag = {git = "https://github.com/CoffmanTaylor/HIBag.git", branch = "main"}
+crossbeam-channel = "0.5"
+num_cpus = "1.13.0"

@@ -3,6 +3,7 @@ use std::{
     fmt::Debug,
     iter,
     sync::Arc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -74,8 +75,8 @@ impl<State, InvRes> SearchResults<State, InvRes> {
 #[derive(Clone)]
 pub struct SearchConfig<S, InvRes> {
     start_states: VecDeque<S>,
-    invariants: Vec<Arc<Box<dyn Fn(&S) -> Result<(), InvRes>>>>,
-    prune_conditions: Vec<Arc<Box<dyn Fn(&S) -> bool>>>,
+    invariants: Vec<Arc<Box<dyn Fn(&S) -> Result<(), InvRes> + Send + Sync>>>,
+    prune_conditions: Vec<Arc<Box<dyn Fn(&S) -> bool + Send + Sync>>>,
     max_depth: Option<usize>,
     max_states: Option<usize>,
     max_time: Option<Duration>,
@@ -93,7 +94,7 @@ impl<S> SearchConfig<S, String> {
     /// the name will be returned in the [SearchResults::BrokenInvariant].
     pub fn add_named_invariant<F>(&mut self, name: String, inv: F) -> &mut Self
     where
-        F: Fn(&S) -> bool + 'static,
+        F: Fn(&S) -> bool + 'static + Send + Sync,
     {
         self.add_invariant(move |s| if inv(s) { Ok(()) } else { Err(name.clone()) })
     }
@@ -135,7 +136,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// the start States, will be checked against every invariant of the System.
     pub fn add_invariant<F>(&mut self, inv: F) -> &mut Self
     where
-        F: Fn(&S) -> Result<(), InvRes> + 'static,
+        F: Fn(&S) -> Result<(), InvRes> + 'static + Send + Sync,
     {
         self.invariants.push(Arc::new(Box::new(inv)));
         self
@@ -145,7 +146,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// excluding the start States, will be checked against every invariant of the System.
     pub fn add_invariants<I, F>(&mut self, invs: I) -> &mut Self
     where
-        F: Fn(&S) -> Result<(), InvRes> + 'static,
+        F: Fn(&S) -> Result<(), InvRes> + 'static + Send + Sync,
         I: IntoIterator<Item = F>,
     {
         for inv in invs {
@@ -164,7 +165,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
     /// Note: Invariants and the end condition are checked before the state is considered for pruning.
     pub fn add_prune_condition<F>(&mut self, prune_condition: F) -> &mut Self
     where
-        F: Fn(&S) -> bool + 'static,
+        F: Fn(&S) -> bool + 'static + Send + Sync,
     {
         self.prune_conditions
             .push(Arc::new(Box::new(prune_condition)));
@@ -346,4 +347,110 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
             },
         )
     }
+
+    pub fn parallel_search<F>(
+        &self,
+        end_condition: F,
+    ) -> (SearchResults<S, InvRes>, SearchStatistics)
+    where
+        S: SearchState + Clone + Send + Sync + 'static,
+        S::Iter: Send + Sync,
+        InvRes: Send + Sync + 'static,
+        Self: Clone,
+        F: Fn(&S) -> bool + Send + Sync + 'static,
+    {
+        let start_time = Instant::now();
+
+        let to_search = crossbeam_channel::unbounded();
+        // If the channel contains anything, it is time to stop.
+        let control = crossbeam_channel::bounded::<u8>(1);
+
+        for start_state in self.start_states.iter() {
+            to_search
+                .0
+                .send(Arc::new(start_state.clone()).get_transitions())
+                .unwrap();
+        }
+
+        let end_condition = Arc::new(end_condition);
+
+        let threads: Vec<_> = (0..num_cpus::get())
+            .map(|_| {
+                let control = control.clone();
+                let to_search = to_search.clone();
+                let end_condition = Arc::clone(&end_condition);
+                let config = self.clone();
+
+                thread::spawn(move || {
+                    let mut count = 0;
+                    for states in to_search.1 {
+                        // Check if we should stop.
+                        if control.1.len() == 1 {
+                            return (PartialResult::Interrupted, count);
+                        }
+
+                        'states: for state in states {
+                            count += 1;
+
+                            for inv in config.invariants.iter() {
+                                if let Err(res) = inv(&state) {
+                                    // Signal that the search is done.
+                                    control.0.send(1).unwrap();
+                                    return (PartialResult::BrokenInvariant(state, res), count);
+                                }
+                            }
+
+                            if end_condition(&state) {
+                                // Signal that the search is done.
+                                control.0.send(1).unwrap();
+                                return (PartialResult::Found(state), count);
+                            }
+
+                            for condition in config.prune_conditions.iter() {
+                                if condition(&state) {
+                                    continue 'states;
+                                }
+                            }
+
+                            to_search.0.send(Arc::new(state).get_transitions()).unwrap();
+                        }
+                    }
+
+                    (PartialResult::Exhausted, count)
+                })
+            })
+            .collect();
+
+        let res = threads.into_iter().map(|t| t.join()).fold(
+            (PartialResult::Interrupted, 0),
+            |(acc, total), r| match acc {
+                PartialResult::Interrupted | PartialResult::Exhausted => {
+                    let r = r.unwrap();
+                    (r.0, total + r.1)
+                }
+                e => (e, total + r.unwrap().1),
+            },
+        );
+
+        (
+            match res.0 {
+                PartialResult::Found(s) => SearchResults::Found(s),
+                PartialResult::BrokenInvariant(s, r) => SearchResults::BrokenInvariant(s, r),
+                PartialResult::Interrupted => SearchResults::TimedOut,
+                PartialResult::Exhausted => SearchResults::SpaceExhausted,
+            },
+            SearchStatistics {
+                number_of_states: res.1,
+                max_depth: 0,
+                total_time: start_time.elapsed(),
+            },
+        )
+    }
+}
+
+enum PartialResult<State, InvRes> {
+    Found(State),
+    BrokenInvariant(State, InvRes),
+    Interrupted,
+    Exhausted,
 }

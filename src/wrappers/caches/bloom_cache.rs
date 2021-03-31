@@ -3,7 +3,7 @@ use std::{
     hash::Hash,
     iter::FilterMap,
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
 };
 
 use bloom_filter::BloomFilter;
@@ -12,7 +12,7 @@ use crate::SearchState;
 
 #[derive(Clone)]
 pub struct BloomCache<State> {
-    already_searched: Arc<Mutex<BloomFilter<State>>>,
+    already_searched: Arc<RwLock<BloomFilter<State>>>,
     state: Arc<State>, // TODO change to not store a Arc.
 }
 
@@ -33,7 +33,7 @@ where
         let mut filter = BloomFilter::new();
         filter.insert(&s);
         BloomCache {
-            already_searched: Arc::new(Mutex::new(filter)),
+            already_searched: Arc::new(RwLock::new(filter)),
             state: Arc::new(s),
         }
     }
@@ -58,20 +58,24 @@ where
 
 impl<State, SubIter> SearchState for BloomCache<State>
 where
-    State: Eq + Hash + 'static + SearchState<Iter = SubIter>,
+    State: Eq + Hash + 'static + SearchState<Iter = SubIter> + Send + Sync,
     SubIter: Iterator<Item = State>,
 {
-    type Iter = FilterMap<SubIter, Box<dyn Fn(State) -> Option<BloomCache<State>>>>;
+    type Iter = FilterMap<SubIter, Box<dyn Fn(State) -> Option<BloomCache<State>> + Send + Sync>>;
 
     fn get_transitions(self: Arc<Self>) -> Self::Iter {
         Arc::clone(&self.state)
             .get_transitions()
             .filter_map(Box::new(move |s| {
-                if self.already_searched.lock().unwrap().insert(&s) {
-                    Some(BloomCache {
-                        already_searched: Arc::clone(&self.already_searched),
-                        state: Arc::new(s),
-                    })
+                if !self.already_searched.read().unwrap().possibly_contains(&s) {
+                    if self.already_searched.write().unwrap().insert(&s) {
+                        Some(BloomCache {
+                            already_searched: Arc::clone(&self.already_searched),
+                            state: Arc::new(s),
+                        })
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -79,7 +83,7 @@ where
     }
 
     fn clear_shared_state(&mut self) {
-        self.already_searched = Arc::new(Mutex::new(BloomFilter::new()));
+        self.already_searched = Arc::new(RwLock::new(BloomFilter::new()));
     }
 
     fn merge_shared_state(&mut self, other: &mut Self) {

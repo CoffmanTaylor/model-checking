@@ -135,7 +135,7 @@ impl<State, InvRes> PhaseConfig<State, InvRes> {
 impl<State> PhaseConfig<State, String> {
     pub fn add_named_phase_invariant<F>(mut self, name: String, inv: F) -> Self
     where
-        F: Fn(&State) -> bool + 'static,
+        F: Fn(&State) -> bool + Send + Sync + 'static,
     {
         match self.config_or_error {
             PhaseConfigOrError::Config {
