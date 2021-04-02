@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use hi_bag::HIBag;
+use hi_set::bag::HIBag;
 
 use crate::SearchState;
 

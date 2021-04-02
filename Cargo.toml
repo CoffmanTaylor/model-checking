@@ -1,13 +1,13 @@
 [package]
 name = "model-checking"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Taylor Coffman <CoffmanTaylor96+git@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/CoffmanTaylor/model-checking.git"
 
 [dependencies]
-rand = "0.8.3"
-bloom-filter = {git = "https://github.com/CoffmanTaylor/BloomFilter.git", branch = "main"}
-chaining-iter = {git = "https://github.com/CoffmanTaylor/ChainingIterator.git", branch = "main"}
-hi-bag = {git = "https://github.com/CoffmanTaylor/HIBag.git", branch = "main"}
+rand = "0.8"
+bloom-filter = {git = "https://github.com/CoffmanTaylor/BloomFilter.git", tag = "v0.1.0"}
+chaining-iter = {git = "https://github.com/CoffmanTaylor/ChainingIterator.git", tag = "v0.1.0"}
+hi-set = {git = "https://github.com/CoffmanTaylor/HISet.git", tag = "v0.2.0"}
