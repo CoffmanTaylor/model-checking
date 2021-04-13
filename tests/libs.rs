@@ -1,5 +1,5 @@
 pub mod chain {
-    use std::{iter, sync::Arc};
+    use std::iter;
 
     use model_checking::SearchState;
 
@@ -8,14 +8,14 @@ pub mod chain {
 
     impl SearchState for State {
         type Iter = iter::Once<State>;
-        fn get_transitions(self: Arc<Self>) -> Self::Iter {
+        fn get_transitions(self) -> Self::Iter {
             iter::once(State(self.0 + 1))
         }
     }
 }
 
 pub mod tree {
-    use std::{iter, sync::Arc};
+    use std::iter;
 
     use model_checking::SearchState;
 
@@ -24,7 +24,7 @@ pub mod tree {
 
     impl SearchState for State {
         type Iter = iter::Chain<iter::Once<State>, iter::Once<State>>;
-        fn get_transitions(self: Arc<Self>) -> Self::Iter {
+        fn get_transitions(self: Self) -> Self::Iter {
             iter::once(State(self.0 + 1, self.1)).chain(iter::once(State(self.0, self.1 + 1)))
         }
     }

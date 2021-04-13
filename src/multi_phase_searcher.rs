@@ -130,6 +130,19 @@ impl<State, InvRes> PhaseConfig<State, InvRes> {
         }
         self
     }
+
+    pub fn add_phase_prune_condition<F>(mut self, prune_condition: F) -> Self
+    where
+        F: Fn(&State) -> bool + 'static,
+    {
+        match &mut self.config_or_error {
+            PhaseConfigOrError::Config { phase_searcher, .. } => {
+                phase_searcher.add_prune_condition(prune_condition);
+                self
+            }
+            PhaseConfigOrError::Error { .. } => self,
+        }
+    }
 }
 
 impl<State> PhaseConfig<State, String> {
@@ -196,5 +209,12 @@ impl<State, InvRes> PhaseSearchResults<State, InvRes> {
         SearchConfig<State, InvRes>: Clone,
     {
         self.add_phase_helper(Some(name))
+    }
+
+    pub fn is_found(&self) -> bool {
+        match self.results {
+            Found(_) => true,
+            _ => false,
+        }
     }
 }

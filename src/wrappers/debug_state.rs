@@ -9,7 +9,7 @@ use crate::SearchState;
 
 #[derive(Debug, Clone)]
 pub struct DebugState<State> {
-    inner_state: Arc<State>,
+    inner_state: Option<State>,
     from: usize,
     this: usize,
     last: Arc<Mutex<usize>>,
@@ -21,7 +21,7 @@ impl<State> DebugState<State> {
         State: Debug,
     {
         DebugState {
-            inner_state: Arc::new(inner_state),
+            inner_state: Some(inner_state),
             from: 0,
             this: 0,
             last: Arc::new(Mutex::new(0)),
@@ -33,7 +33,10 @@ impl<State> Deref for DebugState<State> {
     type Target = State;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner_state
+        match &self.inner_state {
+            Some(s) => s,
+            None => unreachable!(), // The only time we have a none is when we call get_transitions which takes self.
+        }
     }
 }
 
@@ -43,8 +46,10 @@ where
 {
     type Iter = Map<State::Iter, Box<dyn Fn(State) -> DebugState<State>>>;
 
-    fn get_transitions(self: std::sync::Arc<Self>) -> Self::Iter {
-        Arc::clone(&self.inner_state)
+    fn get_transitions(mut self) -> Self::Iter {
+        self.inner_state
+            .take()
+            .unwrap()
             .get_transitions()
             .map(Box::new(move |s| {
                 let mut last = self.last.lock().unwrap();
@@ -53,7 +58,7 @@ where
 
                 println!("Searching {} -> {}: {:?}", self.this, this, &s);
                 DebugState {
-                    inner_state: Arc::new(s),
+                    inner_state: Some(s),
                     from: self.this,
                     this,
                     last: Arc::clone(&self.last),

@@ -126,7 +126,7 @@ fn bounded_space() {
 
     impl SearchState for State {
         type Iter = Box<dyn Iterator<Item = State>>;
-        fn get_transitions(self: Arc<Self>) -> Box<dyn Iterator<Item = State>> {
+        fn get_transitions(self) -> Box<dyn Iterator<Item = State>> {
             if self.0 < 10 {
                 Box::new(iter::once(State(self.0 + 1)))
             } else {
@@ -204,7 +204,7 @@ mod shared_state {
     impl SearchState for State {
         type Iter = Once<State>;
 
-        fn get_transitions(self: Arc<Self>) -> Self::Iter {
+        fn get_transitions(self) -> Self::Iter {
             self.shared.lock().unwrap().add_assign(1);
             iter::once(State {
                 shared: Arc::clone(&self.shared),

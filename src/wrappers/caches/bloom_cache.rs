@@ -13,7 +13,7 @@ use crate::SearchState;
 #[derive(Clone)]
 pub struct BloomCache<State> {
     already_searched: Arc<Mutex<BloomFilter<State>>>,
-    state: Arc<State>, // TODO change to not store a Arc.
+    state: State,
 }
 
 impl<State> Debug for BloomCache<State>
@@ -34,7 +34,7 @@ where
         filter.insert(&s);
         BloomCache {
             already_searched: Arc::new(Mutex::new(filter)),
-            state: Arc::new(s),
+            state: s,
         }
     }
 }
@@ -43,7 +43,7 @@ impl<State> Deref for BloomCache<State> {
     type Target = State;
 
     fn deref(&self) -> &Self::Target {
-        &*self.state
+        &self.state
     }
 }
 
@@ -52,7 +52,7 @@ where
     State: Clone,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        Arc::make_mut(&mut self.state)
+        &mut self.state
     }
 }
 
@@ -63,19 +63,18 @@ where
 {
     type Iter = FilterMap<SubIter, Box<dyn Fn(State) -> Option<BloomCache<State>>>>;
 
-    fn get_transitions(self: Arc<Self>) -> Self::Iter {
-        Arc::clone(&self.state)
-            .get_transitions()
-            .filter_map(Box::new(move |s| {
-                if self.already_searched.lock().unwrap().insert(&s) {
-                    Some(BloomCache {
-                        already_searched: Arc::clone(&self.already_searched),
-                        state: Arc::new(s),
-                    })
-                } else {
-                    None
-                }
-            }))
+    fn get_transitions(self) -> Self::Iter {
+        let already_searched = self.already_searched;
+        self.state.get_transitions().filter_map(Box::new(move |s| {
+            if already_searched.lock().unwrap().insert(&s) {
+                Some(BloomCache {
+                    already_searched: Arc::clone(&already_searched),
+                    state: s,
+                })
+            } else {
+                None
+            }
+        }))
     }
 
     fn clear_shared_state(&mut self) {

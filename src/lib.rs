@@ -20,7 +20,7 @@ pub trait SearchState {
     /// Get all possible states that can be reached in one 'step' from this state. The order and content
     /// of the returned iterator MUST be deterministic and consistent within the same compilation. Must
     /// be idempotent.
-    fn get_transitions(self: Arc<Self>) -> Self::Iter;
+    fn get_transitions(self) -> Self::Iter;
 
     /// If this type contains any shared data, this function will merge the shared data between the two
     /// given states.
@@ -255,7 +255,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
 
         // Create the vec of transitions.
         tmp.into_iter()
-            .map(|s| iter::repeat(1).zip(Arc::new(s).get_transitions()))
+            .map(|s| iter::repeat(1).zip(s.get_transitions()))
             .for_each(|i| to_search.include(i));
 
         // Variables used for printing statistics and determining if we have gone passed a search constraint.
@@ -329,7 +329,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
             }
 
             // Add the possible transitions to the search queue.
-            let transitions = iter::repeat(depth + 1).zip(Arc::new(state).get_transitions());
+            let transitions = iter::repeat(depth + 1).zip(state.get_transitions());
             to_search.include(transitions);
         }
 
