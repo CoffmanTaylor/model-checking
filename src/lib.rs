@@ -63,18 +63,19 @@ pub enum SearchResults<State, InvRes> {
 
 impl<State, InvRes> SearchResults<State, InvRes> {
     pub fn is_found(&self) -> bool {
-        match self {
-            Found(_) => true,
-            _ => false,
-        }
+        matches!(self,
+            Found(_))
     }
 }
+
+pub type InvariantResult<Res> = Result<(), Res>;
+pub type Invariant<S, Res> = Box<dyn Fn(&S) -> InvariantResult<Res>>;
 
 /// Defines the System that you want to search. The System must contain at least one start state.
 #[derive(Clone)]
 pub struct SearchConfig<S, InvRes> {
     start_states: VecDeque<S>,
-    invariants: Vec<Arc<Box<dyn Fn(&S) -> Result<(), InvRes>>>>,
+    invariants: Vec<Arc<Invariant<S, InvRes>>>,
     prune_conditions: Vec<Arc<Box<dyn Fn(&S) -> bool>>>,
     max_depth: Option<usize>,
     max_states: Option<usize>,
@@ -263,7 +264,7 @@ impl<S, InvRes> SearchConfig<S, InvRes> {
         let mut last_count = 0;
         let mut max_depth = 0;
         let start_time = Instant::now();
-        let mut last_print = start_time.clone();
+        let mut last_print = start_time;
 
         while let Some((depth, state)) = to_search.next() {
             max_depth = usize::max(depth, max_depth);

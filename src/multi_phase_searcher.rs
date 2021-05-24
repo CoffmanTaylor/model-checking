@@ -182,7 +182,7 @@ impl<State, InvRes> PhaseSearchResults<State, InvRes> {
                 config_or_error: PhaseConfigOrError::Config {
                     base_searcher: self.base_searcher.unwrap(),
                     phase_searcher,
-                    name: name,
+                    name,
                 },
             }
         } else {
@@ -212,9 +212,6 @@ impl<State, InvRes> PhaseSearchResults<State, InvRes> {
     }
 
     pub fn is_found(&self) -> bool {
-        match self.results {
-            Found(_) => true,
-            _ => false,
-        }
+        matches!(self.results, Found(_))
     }
 }

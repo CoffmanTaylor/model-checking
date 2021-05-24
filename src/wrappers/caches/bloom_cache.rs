@@ -61,7 +61,7 @@ where
     State: Eq + Hash + 'static + SearchState<Iter = SubIter>,
     SubIter: Iterator<Item = State>,
 {
-    type Iter = FilterMap<SubIter, Box<dyn Fn(State) -> Option<BloomCache<State>>>>;
+    type Iter = FilterMap<SubIter, Box<dyn Fn(State) -> Option<BloomCache<State>>>>; // TODO: Replace with impl ~~~ once it is stabilized.
 
     fn get_transitions(self) -> Self::Iter {
         let already_searched = self.already_searched;

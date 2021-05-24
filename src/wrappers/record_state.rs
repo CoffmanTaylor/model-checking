@@ -46,7 +46,7 @@ where
     State: Eq + 'static + SearchState<Iter = SubIter> + Clone + Ord,
     SubIter: Iterator<Item = State>,
 {
-    type Iter = Map<State::Iter, Box<dyn Fn(State) -> RecordState<'a, State> + 'a>>;
+    type Iter = Map<State::Iter, Box<dyn Fn(State) -> RecordState<'a, State> + 'a>>; // TODO: Replace with impl ~~~ once it is stabilized.
 
     fn get_transitions(self) -> Self::Iter {
         let states = Arc::clone(&self.states);

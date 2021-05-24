@@ -44,7 +44,7 @@ impl<State> SearchState for DebugState<State>
 where
     State: SearchState + Debug + 'static,
 {
-    type Iter = Map<State::Iter, Box<dyn Fn(State) -> DebugState<State>>>;
+    type Iter = Map<State::Iter, Box<dyn Fn(State) -> DebugState<State>>>;  // TODO: Replace with impl ~~~ once it is stabilized.
 
     fn get_transitions(mut self) -> Self::Iter {
         self.inner_state
